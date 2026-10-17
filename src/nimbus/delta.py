@@ -62,7 +62,19 @@ def should_allow_mass_withdrawal(
     a proposed mass withdrawal as real rather than as a failed or partial
     crawl. `outcome.selected == 0` (no candidates matched this recipe's
     patterns at all -- recipe drift, not a quiet night) is never trusted
-    either, for the same reason."""
+    either, for the same reason.
+
+    An explicit `--limit` is disqualifying outright, before the ratio is
+    even considered. A limited run deliberately looks at a slice of the
+    site; the URLs it never opened are not absent, they are unexamined.
+    This is not belt-and-braces on top of the ratio: the ratio is computed
+    against `outcome.selected`, which is the untruncated count precisely
+    so that a limited run cannot score 1.0 -- but an operator who passes
+    `--limit 195` to a 195-listing site would still clear the ratio, and
+    should still not be able to wipe the dataset from an ad-hoc run.
+    """
+    if outcome.limit_applied:
+        return False
     if outcome.selected == 0:
         return False
     return outcome.fetched >= outcome.selected * min_fetch_ratio

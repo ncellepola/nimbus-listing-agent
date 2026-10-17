@@ -106,22 +106,38 @@ class CrawlRecord(BaseModel):
 class CrawlOutcome(BaseModel):
     """The full result of one `crawl_site` run against one domain.
 
-    `records` is what Task 5 extracts from. The five counts exist so an
+    `records` is what Task 5 extracts from. The counts exist so an
     orchestration layer can write a truthful `crawl_runs` row (Task 7)
     without re-deriving them by re-crawling: `crawl_site` already knows
     exactly how many candidate URLs it found, how many matched the
     recipe's listing_url_patterns, how many were actually fetched, and how
     many were skipped for each of the two tolerated reasons (robots.txt,
     or a transport-level FetchError) -- recovering that from `records`
-    alone is impossible once the skipped URLs have been discarded."""
+    alone is impossible once the skipped URLs have been discarded.
+
+    `selected` and `attempted` are deliberately separate, and the
+    distinction is load-bearing rather than cosmetic. `selected` is how
+    many URLs the *recipe* implied -- every candidate matching
+    `listing_url_patterns`, before any `--limit`. `attempted` is how many
+    of those this particular run actually walked. They differ only when an
+    operator passed an explicit limit, and conflating them is what let
+    `--limit 5` against a 195-listing site report "5 of 5 fetched" and so
+    authorise withdrawing the other 190 (see
+    `nimbus.delta.should_allow_mass_withdrawal`, which divides by
+    `selected`, never `attempted`)."""
 
     domain: str
     records: list[CrawlRecord]
     candidates: int
     selected: int
+    attempted: int
     fetched: int
     skipped_robots: int
     skipped_errors: int
+    # True when an explicit `limit` truncated the selected set. A limited
+    # run is by construction a partial view of the site, so it is never
+    # evidence that the URLs it did not even look at have gone.
+    limit_applied: bool = False
 
 
 class ExtractionResult(BaseModel):

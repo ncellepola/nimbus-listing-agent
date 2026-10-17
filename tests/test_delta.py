@@ -10,7 +10,11 @@ import sqlite3
 from conftest import make_listing
 
 from nimbus import storage
-from nimbus.delta import apply_delta, should_allow_mass_withdrawal
+from nimbus.delta import (
+    MASS_WITHDRAWAL_FETCH_RATIO,
+    apply_delta,
+    should_allow_mass_withdrawal,
+)
 from nimbus.models import CrawlOutcome
 from nimbus.storage import init_db
 
@@ -161,15 +165,49 @@ def test_apply_delta_allow_mass_withdrawal_overrides_the_guard(tmp_path):
     assert report.withdrawal_suppressed is False
 
 
-def _outcome(*, selected: int, fetched: int) -> CrawlOutcome:
+def _outcome(
+    *, selected: int, fetched: int, attempted: int | None = None, limit_applied: bool = False
+) -> CrawlOutcome:
+    attempted = selected if attempted is None else attempted
     return CrawlOutcome(
         domain=DOMAIN,
         records=[],
         candidates=selected,
         selected=selected,
+        attempted=attempted,
         fetched=fetched,
         skipped_robots=0,
-        skipped_errors=selected - fetched,
+        skipped_errors=attempted - fetched,
+        limit_applied=limit_applied,
+    )
+
+
+def test_should_allow_mass_withdrawal_refuses_a_limited_run():
+    """Measured against this repo's own fixtures: `--limit 5` on a site
+    whose recipe implies 195 listing URLs used to report `selected=5,
+    fetched=5` -- a ratio of exactly 1.0 -- and so authorised withdrawing
+    the other 190. The CLI advertises `--limit` and the architecture doc
+    tells operators to use it, so this was reachable by following the
+    documentation."""
+    limited = _outcome(selected=195, fetched=5, attempted=5, limit_applied=True)
+
+    # The truncated view -- what the outcome used to report -- clears the
+    # ratio trivially, which is exactly why the ratio alone is not enough.
+    assert limited.fetched >= limited.attempted * MASS_WITHDRAWAL_FETCH_RATIO
+    assert should_allow_mass_withdrawal(limited) is False
+
+
+def test_should_allow_mass_withdrawal_refuses_a_limit_that_covered_everything():
+    """Carrying the untruncated count fixes the ratio, but a limit equal to
+    (or above) the selected set still clears it. An ad-hoc, operator-driven
+    partial run is never the thing that should wipe a dataset, however much
+    of the site it happened to cover, so an applied limit is disqualifying
+    in its own right."""
+    assert (
+        should_allow_mass_withdrawal(
+            _outcome(selected=195, fetched=195, attempted=195, limit_applied=True)
+        )
+        is False
     )
 
 

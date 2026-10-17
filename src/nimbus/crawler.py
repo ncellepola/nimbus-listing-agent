@@ -254,9 +254,14 @@ async def crawl_site(
     the logging calls below for the exact conditions.
     """
     candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
-    listing_urls = select_listing_urls(candidates, recipe)
-    if limit is not None:
-        listing_urls = listing_urls[:limit]
+    # `selected_urls` is what the recipe implied; `listing_urls` is what
+    # this run actually walks. They differ only under an explicit --limit,
+    # and both numbers reach the CrawlOutcome: reporting the truncated
+    # count as `selected` is what let `--limit 5` on a 195-listing site
+    # look like a complete crawl to the mass-withdrawal guard.
+    selected_urls = select_listing_urls(candidates, recipe)
+    limit_applied = limit is not None and limit < len(selected_urls)
+    listing_urls = selected_urls[:limit] if limit is not None else selected_urls
 
     records: list[CrawlRecord] = []
     skipped_robots = 0
@@ -293,7 +298,7 @@ async def crawl_site(
     # failure shapes below -- across hundreds of sites, none of these three
     # must look identical in the logs with only per-URL WARNINGs to tell
     # them apart.
-    if candidates and not listing_urls:
+    if candidates and not selected_urls:
         # Candidates existed but listing_url_patterns matched none of
         # them: this is recipe drift, not a quiet night. A site redesign
         # that changes its URL structure produces exactly this shape, and
@@ -319,12 +324,14 @@ async def crawl_site(
         )
     else:
         logger.info(
-            "crawl_site(%s): %d candidate(s), %d selected, %d fetched "
-            "(skipped_robots=%d, skipped_errors=%d)",
+            "crawl_site(%s): %d candidate(s), %d selected, %d attempted, %d fetched "
+            "(limit_applied=%s, skipped_robots=%d, skipped_errors=%d)",
             recipe.domain,
             len(candidates),
+            len(selected_urls),
             len(listing_urls),
             len(records),
+            limit_applied,
             skipped_robots,
             skipped_errors,
         )
@@ -333,8 +340,10 @@ async def crawl_site(
         domain=recipe.domain,
         records=records,
         candidates=len(candidates),
-        selected=len(listing_urls),
+        selected=len(selected_urls),
+        attempted=len(listing_urls),
         fetched=len(records),
         skipped_robots=skipped_robots,
         skipped_errors=skipped_errors,
+        limit_applied=limit_applied,
     )

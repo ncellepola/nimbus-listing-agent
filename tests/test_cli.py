@@ -222,6 +222,7 @@ def test_crawl_never_derives_allow_mass_withdrawal_from_fetched_greater_than_zer
         records=[],
         candidates=1075,
         selected=1075,
+        attempted=1075,
         fetched=1,
         skipped_robots=0,
         skipped_errors=1074,

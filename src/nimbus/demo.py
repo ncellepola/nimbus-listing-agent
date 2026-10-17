@@ -248,7 +248,8 @@ async def run_offline_demo() -> None:
         )
         typer.echo(
             f"      {outcome.candidates} candidate(s), {outcome.selected} selected, "
-            f"{outcome.fetched} fetched (crawl_delay={policy.crawl_delay}s, from robots.txt)"
+            f"{outcome.fetched} fetched (crawl_delay={policy.crawl_delay}s -- this site's "
+            "robots.txt declares no Crawl-delay, so this is the configured default)"
         )
         listings = await _extract_and_record(conn, recipe, outcome)
         first_delta = apply_delta(
@@ -351,7 +352,10 @@ async def run_live_demo(settings: Settings) -> None:
         cache = HtmlCache(root=live_settings.cache_dir)
         fetcher = Fetcher(live_settings, cache, HttpxBackend(user_agent=live_settings.user_agent))
         policy = await fetcher.robots_for(_DOMAIN)
-        typer.echo(f"\n[2/3] Crawling live (crawl_delay={policy.crawl_delay}s, from robots.txt)...")
+        typer.echo(
+            f"\n[2/3] Crawling live (crawl_delay={policy.crawl_delay}s -- from robots.txt if it "
+            "declares a Crawl-delay for us, otherwise the configured default)..."
+        )
         outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=policy.crawl_delay, limit=3)
         typer.echo(f"      fetched {outcome.fetched}/{outcome.selected} selected page(s)")
 

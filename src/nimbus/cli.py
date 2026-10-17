@@ -136,9 +136,16 @@ def crawl(
     )
     typer.echo(
         f"{domain}: {outcome.candidates} candidate(s), {outcome.selected} selected, "
-        f"{outcome.fetched} fetched (skipped_robots={outcome.skipped_robots}, "
+        f"{outcome.attempted} attempted, {outcome.fetched} fetched "
+        f"(skipped_robots={outcome.skipped_robots}, "
         f"skipped_errors={outcome.skipped_errors}, crawl_delay={policy.crawl_delay}s)"
     )
+    if outcome.limit_applied:
+        typer.echo(
+            f"      --limit {limit} truncated {outcome.selected} selected URL(s) to "
+            f"{outcome.attempted}: this run is a partial view of the site, so it cannot "
+            "authorise withdrawing anything it did not look at."
+        )
 
     api_key = settings.anthropic_api_key.get_secret_value()
     if not api_key:
