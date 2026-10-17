@@ -2,9 +2,9 @@
 architectural claim (ADR-0002, ADR-0003): an LLM learns a site once, at
 onboarding, and produces a `SiteRecipe`; everything here just walks that
 recipe with a plain Python loop over `Fetcher.get()`. The last test in this
-file is not box-ticking -- it mechanically enforces that no LLM client is
-even importable from this module, so the architectural separation cannot
-silently rot into "well, it's only a small agent call".
+file is not box-ticking -- it greps the whole module source for the two LLM
+client package names, so the architectural separation cannot silently rot
+into "well, it's only a small lazy import inside one function".
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from nimbus.crawler import collect_candidate_urls, crawl_site, select_listing_ur
 from nimbus.fetch.backends import RawResponse
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
-from nimbus.models import CrawlRecord
+from nimbus.models import CrawlOutcome, CrawlRecord
 
 FIXTURES = Path(__file__).parent / "fixtures"
 HENSTOCK_ROBOTS = (FIXTURES / "robots" / "henstock.txt").read_text()
@@ -325,9 +325,16 @@ async def test_crawl_site_honours_crawl_delay(cache, fetcher):
     async def fake_sleep(delay: float) -> None:
         delays.append(delay)
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=2.0, sleep=fake_sleep)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=2.0, sleep=fake_sleep)
 
-    assert len(records) == 3
+    assert isinstance(outcome, CrawlOutcome)
+    assert len(outcome.records) == 3
+    assert outcome.domain == "ashworthholme.co.uk"
+    assert outcome.candidates == 3
+    assert outcome.selected == 3
+    assert outcome.fetched == 3
+    assert outcome.skipped_robots == 0
+    assert outcome.skipped_errors == 0
     assert delays
     assert all(d >= 2.0 for d in delays)
 
@@ -360,9 +367,12 @@ async def test_crawl_site_respects_limit(cache, fetcher):
         listing_url_patterns=["/property/*"],
     )
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0, limit=3)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0, limit=3)
 
-    assert len(records) == 3
+    assert len(outcome.records) == 3
+    assert outcome.candidates == 4
+    assert outcome.selected == 3
+    assert outcome.fetched == 3
 
 
 async def test_crawl_site_skips_robots_disallowed_without_failing_the_run(cache, fetcher):
@@ -388,10 +398,12 @@ async def test_crawl_site_skips_robots_disallowed_without_failing_the_run(cache,
         listing_url_patterns=["/property/*"],
     )
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    assert disallowed not in [r.url for r in records]
-    assert allowed in [r.url for r in records]
+    assert disallowed not in [r.url for r in outcome.records]
+    assert allowed in [r.url for r in outcome.records]
+    assert outcome.skipped_robots == 1
+    assert outcome.fetched == 1
 
 
 async def test_crawl_site_produces_crawl_records_with_hash_and_cache_flag(cache, fetcher):
@@ -415,10 +427,10 @@ async def test_crawl_site_produces_crawl_records_with_hash_and_cache_flag(cache,
         listing_url_patterns=["/property/*"],
     )
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    assert len(records) == 1
-    record = records[0]
+    assert len(outcome.records) == 1
+    record = outcome.records[0]
     assert isinstance(record, CrawlRecord)
     assert record.url == "https://www.ashworthholme.co.uk/property/1"
     assert record.html == "<html>listing 1</html>"
@@ -460,11 +472,13 @@ async def test_crawl_site_skips_a_page_that_errors_on_fetch_without_failing_the_
     )
     fetcher = Fetcher(settings, cache, _SelectivelyFlakyBackend())
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    urls = [r.url for r in records]
+    urls = [r.url for r in outcome.records]
     assert "https://www.ashworthholme.co.uk/property/bad" not in urls
     assert "https://www.ashworthholme.co.uk/property/good" in urls
+    assert outcome.skipped_errors == 1
+    assert outcome.fetched == 1
 
 
 async def test_crawl_site_raises_nothing_when_all_candidates_disallowed(cache, fetcher):
@@ -485,9 +499,11 @@ async def test_crawl_site_raises_nothing_when_all_candidates_disallowed(cache, f
         listing_url_patterns=["/property/*"],
     )
 
-    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    assert records == []
+    assert outcome.records == []
+    assert outcome.skipped_robots == 1
+    assert outcome.fetched == 0
 
 
 async def test_crawl_site_logs_error_summary_when_every_candidate_fails(cache, fetcher, caplog):
@@ -513,9 +529,9 @@ async def test_crawl_site_logs_error_summary_when_every_candidate_fails(cache, f
     )
 
     with caplog.at_level(logging.INFO, logger="nimbus.crawler"):
-        records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+        outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    assert records == []
+    assert outcome.records == []
     summary = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert summary, "expected an ERROR summary line when every candidate failed"
     assert "henstockps.co.uk" in summary[0].getMessage()
@@ -543,30 +559,29 @@ async def test_crawl_site_logs_info_summary_on_a_normal_run(cache, fetcher, capl
     )
 
     with caplog.at_level(logging.INFO, logger="nimbus.crawler"):
-        records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+        outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
-    assert len(records) == 1
+    assert len(outcome.records) == 1
     summary = [r for r in caplog.records if r.levelno == logging.INFO]
     assert summary, "expected an INFO summary line on a normal run"
     assert "ashworthholme.co.uk" in summary[0].getMessage()
     assert not any(r.levelno == logging.ERROR for r in caplog.records)
 
 
-def test_crawler_module_imports_no_llm_client():
-    """Checks only the module's actual import statements, not the whole
-    file -- banning the bare substring anywhere in the file is brittle
-    (it already produced a false positive against this module's own
-    docstring prose) and is not what the architectural claim is about.
-    The claim is specifically that nothing in this module *imports* an
-    LLM client; a comment or docstring that merely mentions one by name
-    is not a violation."""
+def test_crawler_module_contains_no_llm_client():
+    """Whole-file check, deliberately: a lazy, in-function import (the
+    pattern `nimbus.discovery` already uses for `claude_agent_sdk`, to
+    dodge a startup cost or an import cycle) is exactly how an LLM call
+    would realistically creep onto this hot path, and an import-lines-only
+    grep would miss it entirely since such a line is indented inside a
+    function body, not the module-level import block. Banning the bare
+    substring anywhere in the file is the stronger, correct check; this
+    module's own docstring prose must simply avoid naming the two
+    packages literally (see the module docstring above, which refers to
+    "the two LLM client package names" rather than writing them out)."""
     src = Path("src/nimbus/crawler.py").read_text()
-    import_lines = [
-        line for line in src.splitlines() if line.strip().startswith(("import ", "from "))
-    ]
-    assert import_lines, "expected at least one import statement to check"
-    assert not any("anthropic" in line for line in import_lines)
-    assert not any("claude_agent_sdk" in line for line in import_lines)
+    assert "anthropic" not in src
+    assert "claude_agent_sdk" not in src
 
 
 async def test_robots_disallowed_is_importable_for_catching(fetcher):

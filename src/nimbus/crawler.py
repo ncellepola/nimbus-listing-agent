@@ -28,7 +28,11 @@ Three functions:
   down to actual listing pages.
 - `crawl_site` ties the two together and fetches each selected listing URL,
   honouring a caller-supplied `crawl_delay` between fetches and skipping (not
-  failing the run on) any URL robots.txt disallows or any `FetchError`.
+  failing the run on) any URL robots.txt disallows or any `FetchError`. It
+  returns a `CrawlOutcome`, not a bare list: the fetched `CrawlRecord`s plus
+  candidate/selected/fetched/skipped counts an orchestration layer can
+  write straight into `storage.crawl_runs` without re-crawling to recover
+  them.
 
 Crawl delay is deliberately not read off the recipe: it is live robots.txt
 policy that can change week to week, so the caller resolves it fresh via
@@ -51,7 +55,7 @@ from bs4 import BeautifulSoup
 
 from nimbus.fetch.fetcher import Fetcher, FetchError, RobotsDisallowed
 from nimbus.fetch.sitemap import is_sitemap_index, locs
-from nimbus.models import CrawlRecord, PaginationRule, SiteRecipe
+from nimbus.models import CrawlOutcome, CrawlRecord, PaginationRule, SiteRecipe
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +224,7 @@ async def crawl_site(
     crawl_delay: float,
     limit: int | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> list[CrawlRecord]:
+) -> CrawlOutcome:
     """Fetch every listing page a recipe implies, with no LLM anywhere in
     the loop. `crawl_delay` is resolved by the caller from live robots.txt
     (`await fetcher.robots_for(domain)`) rather than frozen into the
@@ -233,6 +237,13 @@ async def crawl_site(
     those two (a bug in this module, a corrupted cache entry, ...) still
     propagates, since silently swallowing *that* would hide a real defect
     behind the exact same log line as routine site flakiness.
+
+    Returns a `CrawlOutcome`, not a bare list of records: the counts an
+    orchestration layer needs to write a truthful `storage.crawl_runs` row
+    only exist here, inside this loop, and are gone once a skipped URL has
+    been discarded -- a caller cannot recover them by inspecting `records`
+    alone, and must not have to re-crawl just to find out how many URLs
+    failed.
     """
     candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
     listing_urls = select_listing_urls(candidates, recipe)
@@ -294,4 +305,12 @@ async def crawl_site(
             skipped_errors,
         )
 
-    return records
+    return CrawlOutcome(
+        domain=recipe.domain,
+        records=records,
+        candidates=len(candidates),
+        selected=len(listing_urls),
+        fetched=len(records),
+        skipped_robots=skipped_robots,
+        skipped_errors=skipped_errors,
+    )
