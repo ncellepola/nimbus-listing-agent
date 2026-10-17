@@ -136,3 +136,33 @@ class AiSignals(BaseModel):
     content_signal: dict[str, str] = Field(default_factory=dict)
     named_ai_agents: set[str] = Field(default_factory=set)
     ai_training_allowed: bool = True
+
+
+class SiteHealth(BaseModel):
+    """A domain's extraction health over its most recent `window` audit
+    rows (Task 6). Deliberately built from `extraction_audit.schema_valid`
+    / `needs_review` — never from `ExtractionResult.overall_confidence`,
+    which only ever takes the values 1.0 or 0.6 and carries no information
+    beyond `needs_review` (Task 5's own finding)."""
+
+    domain: str
+    window: int
+    schema_valid_rate: float = Field(ge=0.0, le=1.0)
+    needs_review_rate: float = Field(ge=0.0, le=1.0)
+    sample_size: int = Field(ge=0)
+
+
+class DeltaReport(BaseModel):
+    """The result of comparing one night's crawl against what storage
+    already knew for a domain (Task 6), by `source_url`. `price_changed`
+    entries are `(source_url, old_price_gbp, new_price_gbp)`."""
+
+    new: list[str] = Field(default_factory=list)
+    price_changed: list[tuple[str, int, int]] = Field(default_factory=list)
+    withdrawn: list[str] = Field(default_factory=list)
+    unchanged: list[str] = Field(default_factory=list)
+    # True when apply_delta refused to report a mass withdrawal (more than
+    # half of a domain's stored listings vanishing in one run -- almost
+    # always a failed or partial crawl, not an overnight sell-off) and left
+    # those listings untouched instead. See nimbus.delta.apply_delta.
+    withdrawal_suppressed: bool = False
