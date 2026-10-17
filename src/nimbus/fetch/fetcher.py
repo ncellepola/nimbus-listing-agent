@@ -57,7 +57,11 @@ class Fetcher:
             policy.crawl_delay = self.settings.default_crawl_delay
             return policy
 
-        return RobotsPolicy.from_text(raw.body, agent=self._agent_name)
+        return RobotsPolicy.from_text(
+            raw.body,
+            agent=self._agent_name,
+            default_crawl_delay=self.settings.default_crawl_delay,
+        )
 
     async def get(self, url: str, *, allow_network: bool = True) -> CachedPage:
         domain = urlsplit(url).netloc

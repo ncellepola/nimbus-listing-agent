@@ -45,3 +45,12 @@ Crawl-delay: 5
     assert p.can_fetch("https://example.co.uk/private/page") is True
     assert p.can_fetch("https://example.co.uk/secret/page") is False
     assert p.crawl_delay == 5.0
+
+
+def test_robots_from_text_uses_injected_default_when_block_omits_crawl_delay():
+    text = """\
+User-agent: *
+Disallow: /private/
+"""
+    p = RobotsPolicy.from_text(text, agent="NimbusBot", default_crawl_delay=7.25)
+    assert p.crawl_delay == 7.25

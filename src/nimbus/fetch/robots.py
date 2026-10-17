@@ -165,12 +165,14 @@ class RobotsPolicy:
         self.ai_signals = ai_signals
 
     @classmethod
-    def from_text(cls, text: str, *, agent: str) -> RobotsPolicy:
+    def from_text(
+        cls, text: str, *, agent: str, default_crawl_delay: float = DEFAULT_CRAWL_DELAY
+    ) -> RobotsPolicy:
         blocks, sitemaps = _parse_blocks(text)
         matched = _matching_blocks(blocks, agent)
 
         rules: list[tuple[bool, str]] = []
-        crawl_delay = DEFAULT_CRAWL_DELAY
+        crawl_delay = default_crawl_delay
         content_signal: dict[str, str] = {}
         for block in matched:
             rules.extend(block.rules)
