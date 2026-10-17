@@ -56,11 +56,31 @@ from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup
-from markdownify import markdownify
 from pydantic import ValidationError
 
 from nimbus import storage
+from nimbus.htmltext import html_to_markdown
 from nimbus.models import CrawlRecord, ExtractionResult, Listing, PropertyType, SiteRecipe, Tenure
+
+
+class ExtractionError(Exception):
+    """Raised when `client.messages.create` itself fails for `record.url` —
+    a timeout, a rate limit, an authentication failure, any transport- or
+    API-level problem the `anthropic` client raises.
+
+    Mirrors `nimbus.fetch.fetcher.FetchError`'s shape and purpose: `Fetcher.get()`
+    wraps whatever a backend raises so callers catch one Nimbus-level type
+    regardless of backend; `extract_listing` does the same here so a
+    caller (Task 7's orchestrator) catches `ExtractionError` without
+    importing anything `anthropic`-specific. It still propagates — this
+    boundary changes the type, it does not swallow the failure.
+    """
+
+    def __init__(self, url: str, cause: BaseException) -> None:
+        self.url = url
+        self.cause = cause
+        super().__init__(f"failed to extract {url}: {cause}")
+
 
 EXTRACT_PROMPT_VERSION = "v1"
 
@@ -74,15 +94,36 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "extract.md"
 
 _TOOL_NAME = "emit_listing"
 
-# Tags whose content carries no listing information and should be dropped
-# before markdown conversion, same convention as mcp_server._html_to_markdown.
-_STRIP_TAGS = ("script", "style", "nav", "footer")
-
 # Where the true price lives when the recipe has no field_hint selector for
 # it, or the selector matches nothing on this particular page: status text
 # (e.g. "For Sale £650,000", "To Let £1,000 PCM") is overwhelmingly carried
 # in a top-level heading, never deep in body copy.
 _HEADING_TAGS = ("h1", "h2", "h3")
+
+# Elements that are *inputs* (a price-filter dropdown's <select>/<option>,
+# a search <form>, a text/number <input>, a <datalist>) rather than
+# anything the page asserts about this listing. ashworthholme.co.uk's own
+# price-filter <select> even has id="main-minprice-sales", which would
+# otherwise satisfy _PRICE_WIDGET_SELECTOR below directly -- stripping
+# these subtrees first means no later rule in _corroboration_text can ever
+# see a decoy value a user merely *could have chosen*, no matter how
+# broadly that rule matches.
+_FORM_CONTROL_TAGS = ("select", "option", "form", "input", "datalist")
+
+# Widens the corroboration region to elements that *name themselves* as a
+# price widget, for a site like jaksandco.co.uk whose recipe has no
+# field_hint selector for price and whose price sits in a plain
+# `<div class="price">` rather than any heading at all.
+_PRICE_WIDGET_SELECTOR = "[class*='price'], [id*='price']"
+
+# A real price widget is a short UI snippet (jaksandco.co.uk's own is under
+# 40 characters). This caps _PRICE_WIDGET_SELECTOR against a WordPress-style
+# body/container class such as "price_qualifier-guide-price" -- that
+# literally contains "price" too, but it decorates the whole page's <body>
+# or a top-level wrapper, and matching it would widen the corroboration
+# region back to nearly the entire page: exactly what this function exists
+# to avoid (ruling R26).
+_MAX_PRICE_WIDGET_CHARS = 300
 
 # Cap on how much markdown page text is sent to the model. The six real
 # fixtures convert to 2.8-18.7KB of markdown; this is a safety margin, not a
@@ -208,30 +249,52 @@ def is_residential_sale(raw_text: str, listing: Listing) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _page_markdown(soup: BeautifulSoup) -> str:
-    stripped = BeautifulSoup(str(soup), "html.parser")
-    for tag in stripped(_STRIP_TAGS):
-        tag.decompose()
-    text = markdownify(str(stripped)).strip()
-    return text[:_MAX_PAGE_TEXT_CHARS]
+def _page_markdown(html: str) -> str:
+    return html_to_markdown(html)[:_MAX_PAGE_TEXT_CHARS]
 
 
 def _corroboration_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
-    """Text from the recipe's own price field-hint location, plus every
-    top-level heading. Never the whole page (pre-flight ruling R26) — the
+    """Text from the recipe's own price field-hint location, every
+    top-level heading, and any element that names itself as a price
+    widget by class/id. Never the whole page (pre-flight ruling R26) — the
     whole page is exactly where ashworthholme.co.uk's 48-49 unrelated price
-    values live."""
+    values live.
+
+    Works against a copy of `soup` with every form-control subtree
+    (`select`/`option`/`form`/`input`/`datalist`) removed first, so a
+    decoy value that exists only inside a price-filter dropdown's
+    `<option>` is never visible to *any* of the three rules below, however
+    broadly one of them might otherwise match -- not just the heading scan
+    jaksandco.co.uk needs none of this for, but the class/id widening rule
+    that site does need, which would otherwise be exactly as likely to
+    re-admit ashworthholme.co.uk's dropdown as the thing it was added to
+    find.
+    """
+    cleaned = BeautifulSoup(str(soup), "html.parser")
+    for tag in cleaned(_FORM_CONTROL_TAGS):
+        tag.decompose()
+
     parts: list[str] = []
 
     price_hint = next((h for h in recipe.field_hints if h.field == "price"), None)
     if price_hint is not None and price_hint.css_selector:
         try:
-            matched = soup.select(price_hint.css_selector)
+            matched = cleaned.select(price_hint.css_selector)
         except Exception:
             matched = []
         parts.extend(el.get_text(" ", strip=True) for el in matched)
 
-    parts.extend(el.get_text(" ", strip=True) for el in soup.find_all(_HEADING_TAGS))
+    parts.extend(el.get_text(" ", strip=True) for el in cleaned.find_all(_HEADING_TAGS))
+
+    # jaksandco.co.uk has no field_hint selector for price and no
+    # price-bearing heading at all -- its price lives only in a
+    # `<div class="price">`. The length cap excludes a WordPress-style
+    # body/container class that also contains the substring "price"
+    # (e.g. "price_qualifier-guide-price") but wraps the whole page.
+    for element in cleaned.select(_PRICE_WIDGET_SELECTOR):
+        text = element.get_text(" ", strip=True)
+        if text and len(text) <= _MAX_PRICE_WIDGET_CHARS:
+            parts.append(text)
 
     return "\n".join(part for part in parts if part)
 
@@ -299,16 +362,25 @@ def _listing_tool() -> dict[str, Any]:
     }
 
 
-def _field_confidence(listing: Listing, *, price_corroborated: bool) -> dict[str, float]:
+def _field_confidence(listing: Listing) -> dict[str, float]:
+    """Each field's confidence, derived from what was actually checked —
+    never from anything the model asserted about its own certainty.
+    `price_gbp` is 1.0 whenever it is non-null: a price that failed
+    corroboration is already rewritten to `None` in `extract_listing`
+    *before* this runs, so a non-null price here has, by construction,
+    already passed that check (there is no remaining branch where a
+    non-null, uncorroborated price reaches this function — unlike an
+    earlier version of this function, which carried one anyway). Every
+    other field has no independent check in this task, so a present value
+    scores 0.5 (the model's own unverified claim) rather than 1.0; absent
+    is 0.0."""
     scores: dict[str, float] = {}
     for field in _SCORED_FIELDS:
         value = getattr(listing, field)
         if value is None:
             scores[field] = 0.0
-        elif field == "price_gbp" and price_corroborated:
-            scores[field] = 1.0
         elif field == "price_gbp":
-            scores[field] = 0.5
+            scores[field] = 1.0
         else:
             scores[field] = 0.5
     return scores
@@ -351,16 +423,24 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
             "(or the recipe's field hints no longer match this page)"
         )
 
-    page_text = _page_markdown(soup)
+    page_text = _page_markdown(record.html)
     prompt = _render_extract_prompt(record, recipe, page_text)
 
-    response = await client.messages.create(
-        model=EXTRACTION_MODEL,
-        max_tokens=1024,
-        tools=[_listing_tool()],
-        tool_choice={"type": "tool", "name": _TOOL_NAME},
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = await client.messages.create(
+            model=EXTRACTION_MODEL,
+            max_tokens=1024,
+            tools=[_listing_tool()],
+            tool_choice={"type": "tool", "name": _TOOL_NAME},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:
+        # Wrapped into a Nimbus-level type, the same boundary Fetcher.get()
+        # draws around backend-specific transport errors with FetchError
+        # (fetch/fetcher.py): a caller catches ExtractionError without
+        # importing anything `anthropic`-specific. Still propagates, by
+        # design — this is a type change, not a swallow.
+        raise ExtractionError(record.url, exc) from exc
 
     tool_blocks = [
         block for block in response.content if getattr(block, "type", None) == "tool_use"
@@ -415,7 +495,7 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
             )
             listing = listing.model_copy(update={"price_gbp": None, "price_qualifier": None})
 
-    field_confidence = _field_confidence(listing, price_corroborated=price_corroborated)
+    field_confidence = _field_confidence(listing)
     overall_confidence = 1.0 if price_corroborated else 0.6
 
     return ExtractionResult(

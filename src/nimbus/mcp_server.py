@@ -23,8 +23,6 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
-from bs4 import BeautifulSoup
-from markdownify import markdownify
 from mcp.server.mcpserver import MCPServer
 
 from nimbus.config import Settings
@@ -32,26 +30,13 @@ from nimbus.fetch.backends import CrawlbaseBackend, HttpxBackend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
 from nimbus.fetch.sitemap import is_sitemap_index, locs
-
-# Tags whose content carries no listing information and should be dropped
-# entirely (not merely unwrapped) before markdown conversion.
-_STRIP_TAGS = ("script", "style", "nav", "footer")
+from nimbus.htmltext import html_to_markdown
 
 # Size of get_sitemap's stratified sample_urls. 25, not 10: a sample this
 # small still needs to be spread across a sitemap of thousands of URLs
 # (see _stratified_sample) with enough URLs surviving to cover more than
 # one property-type/branch/date grouping.
 _SAMPLE_SIZE = 25
-
-
-def _html_to_markdown(html: str) -> str:
-    """Strip boilerplate tags (content included, not just the wrapper) and
-    convert what remains to markdown. Raw listing-page HTML runs to tens of
-    thousands of tokens; the markdown is a fraction of that."""
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(_STRIP_TAGS):
-        tag.decompose()
-    return markdownify(str(soup)).strip()
 
 
 def _stratified_sample(urls: list[str], size: int) -> list[str]:
@@ -160,7 +145,7 @@ def _make_fetch_page(fetcher: Fetcher) -> Callable:
         except RobotsDisallowed:
             return {"error": "robots_disallowed", "url": url, "domain": domain}
 
-        content = _html_to_markdown(page.body) if as_markdown else page.body
+        content = html_to_markdown(page.body) if as_markdown else page.body
         truncated = len(content) > max_chars
         if truncated:
             content = content[:max_chars]

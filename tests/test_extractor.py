@@ -15,6 +15,7 @@ from conftest import make_listing, make_recipe
 
 from nimbus.extractor import (
     EXTRACT_PROMPT_VERSION,
+    ExtractionError,
     audit_row,
     extract_listing,
     record_extraction,
@@ -168,17 +169,68 @@ async def test_extract_listing_rejects_price_not_corroborated_by_field_hint():
     assert result.listing.price_gbp is None
 
 
-async def test_extract_listing_corroborates_the_real_price_on_the_real_fixture():
+@pytest.mark.parametrize(
+    "domain,filename,true_price",
+    [
+        # ashworthholme.co.uk: the true price is in the field_hint's own
+        # selector (h2), buried among the page's 48-49 price-filter-dropdown
+        # decoys everywhere else.
+        ("ashworthholme.co.uk", "rossett-ave-altrincham.html", 650_000),
+        ("ashworthholme.co.uk", "sherbrooke-close.html", 850_000),
+        # jaksandco.co.uk: the recipe's price field_hint has no
+        # css_selector at all, and the price is in neither h1 nor any
+        # other heading (jaksandco's own first h2 is "What's nearby?") --
+        # only the price/id-widening rule in _corroboration_text finds it.
+        ("jaksandco.co.uk", "grenfell-road-didsbury.html", 475_000),
+        ("jaksandco.co.uk", "kingsway-manchester.html", 350_000),
+    ],
+)
+async def test_extract_listing_corroborates_the_real_price_on_real_fixtures(
+    domain, filename, true_price
+):
+    recipe = _recipe_from_fixture(domain)
+    record = _record_from_fixture(domain, filename, f"https://www.{domain}/property/{filename}")
+    result = await extract_listing(record, recipe, client=StubClient(price=true_price))
+    assert result.needs_review is False
+    assert result.listing is not None
+    assert result.listing.price_gbp == true_price
+
+
+async def test_extract_listing_still_rejects_the_ashworthholme_decoy_after_widening():
+    # Regression guard for the fix above: widening the corroboration region
+    # by class/id (needed for jaksandco.co.uk) must not re-admit
+    # ashworthholme.co.uk's price-filter <select> -- its own id
+    # ("main-minprice-sales") contains the substring "price" and would
+    # satisfy the widened selector directly if form controls weren't
+    # stripped first.
     recipe = _recipe_from_fixture("ashworthholme.co.uk")
     record = _record_from_fixture(
         "ashworthholme.co.uk",
-        "rossett-ave-altrincham.html",
-        "https://www.ashworthholme.co.uk/property-details/1/-/sale/rossett-ave",
+        "sherbrooke-close.html",
+        "https://www.ashworthholme.co.uk/property-details/1/-/sale/sherbrooke-close",
     )
-    result = await extract_listing(record, recipe, client=StubClient(price=650_000))
-    assert result.needs_review is False
+    result = await extract_listing(record, recipe, client=StubClient(price=10_000_000))
+    assert result.needs_review is True
+    assert any("not corroborated" in issue for issue in result.issues)
     assert result.listing is not None
-    assert result.listing.price_gbp == 650_000
+    assert result.listing.price_gbp is None
+
+
+async def test_extract_listing_wraps_client_failures_in_extraction_error():
+    class _ExplodingMessagesAPI:
+        async def create(self, **kwargs):
+            raise RuntimeError("connection reset")
+
+    class _ExplodingClient:
+        def __init__(self) -> None:
+            self.messages = _ExplodingMessagesAPI()
+
+    record = _simple_record()
+    recipe = _simple_recipe()
+    with pytest.raises(ExtractionError) as excinfo:
+        await extract_listing(record, recipe, client=_ExplodingClient())
+    assert excinfo.value.url == record.url
+    assert isinstance(excinfo.value.cause, RuntimeError)
 
 
 async def test_extract_listing_on_a_page_with_no_extractable_fields():
