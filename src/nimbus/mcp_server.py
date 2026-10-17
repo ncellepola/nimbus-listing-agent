@@ -31,6 +31,7 @@ from nimbus.config import Settings
 from nimbus.fetch.backends import CrawlbaseBackend, HttpxBackend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
+from nimbus.fetch.sitemap import is_sitemap_index, locs
 
 # Tags whose content carries no listing information and should be dropped
 # entirely (not merely unwrapped) before markdown conversion.
@@ -51,22 +52,6 @@ def _html_to_markdown(html: str) -> str:
     for tag in soup(_STRIP_TAGS):
         tag.decompose()
     return markdownify(str(soup)).strip()
-
-
-def _strip_ns(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _locs(root: ET.Element) -> list[str]:
-    """`<loc>` text of each direct child element, regardless of whether the
-    root is a `<urlset>` (children are `<url>`) or a `<sitemapindex>`
-    (children are `<sitemap>`) — both wrap a `<loc>`."""
-    out = []
-    for entry in root:
-        for child in entry:
-            if _strip_ns(child.tag) == "loc" and child.text:
-                out.append(child.text.strip())
-    return out
 
 
 def _stratified_sample(urls: list[str], size: int) -> list[str]:
@@ -127,10 +112,10 @@ def _make_get_sitemap(fetcher: Fetcher) -> Callable:
             except ET.ParseError:
                 continue
 
-            if _strip_ns(root.tag) == "sitemapindex":
+            if is_sitemap_index(root):
                 # Expand one level: fetch each child sitemap and take its
                 # <loc> entries, but do not recurse into further indexes.
-                for child_loc in _locs(root):
+                for child_loc in locs(root):
                     if len(urls) >= max_urls:
                         break
                     try:
@@ -141,9 +126,9 @@ def _make_get_sitemap(fetcher: Fetcher) -> Callable:
                         child_root = ET.fromstring(child_page.body)
                     except ET.ParseError:
                         continue
-                    urls.extend(_locs(child_root))
+                    urls.extend(locs(child_root))
             else:
-                urls.extend(_locs(root))
+                urls.extend(locs(root))
 
             if len(urls) >= max_urls:
                 break

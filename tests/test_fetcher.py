@@ -13,7 +13,7 @@ import pytest
 from nimbus.config import Settings
 from nimbus.fetch.backends import RawResponse
 from nimbus.fetch.cache import HtmlCache
-from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
+from nimbus.fetch.fetcher import Fetcher, FetchError, RobotsDisallowed
 
 FIXTURES = Path(__file__).parent / "fixtures" / "robots"
 HENSTOCK = (FIXTURES / "henstock.txt").read_text()
@@ -96,6 +96,30 @@ async def test_fetcher_fetches_via_backend_on_cache_miss_and_caches_result(tmp_p
     page2 = await fetcher.get("https://www.example.co.uk/property/1")
     assert page2.body == "<html>new</html>"
     assert backend.calls == ["https://www.example.co.uk/property/1"]
+
+
+async def test_fetcher_wraps_backend_failure_as_fetch_error(tmp_path, settings):
+    """A transport-level failure (timeout, too-many-redirects, a backend
+    proxy error, ...) must come out of `Fetcher.get()` as `FetchError`
+    regardless of which exception the configured backend itself raised --
+    that's what lets a caller like the nightly crawler catch one thing
+    without caring whether httpx or Crawlbase is underneath."""
+    cache = HtmlCache(root=tmp_path)
+    cache.put(
+        "https://www.example.co.uk/robots.txt", 200, "text/plain", "User-agent: *\nAllow: /\n"
+    )
+
+    class _ExplodingBackend:
+        async def fetch(self, url: str, *, timeout: float) -> RawResponse:
+            raise RuntimeError("connection reset by peer")
+
+    fetcher = Fetcher(settings, cache, _ExplodingBackend())
+
+    with pytest.raises(FetchError) as exc_info:
+        await fetcher.get("https://www.example.co.uk/property/1")
+
+    assert exc_info.value.url == "https://www.example.co.uk/property/1"
+    assert isinstance(exc_info.value.cause, RuntimeError)
 
 
 async def test_fetcher_robots_for_applies_configured_default_when_block_omits_delay(tmp_path):

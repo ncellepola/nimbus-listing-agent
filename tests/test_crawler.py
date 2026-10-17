@@ -9,6 +9,7 @@ silently rot into "well, it's only a small agent call".
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,16 @@ class _RaisingBackend:
     async def fetch(self, url: str, *, timeout: float):
         self.call_count += 1
         raise AssertionError(f"backend.fetch must not be called for {url}")
+
+
+class _FlakyBackend:
+    """A backend that always raises a transport-level error. Used with a
+    pre-populated cache so only the deliberately-uncached URL under test
+    ever reaches it -- `Fetcher.get()` wraps whatever this raises into
+    `FetchError`, which is what the crawler is being tested against."""
+
+    async def fetch(self, url: str, *, timeout: float) -> RawResponse:
+        raise RuntimeError("connection reset by peer")
 
 
 @pytest.fixture
@@ -194,6 +205,94 @@ async def test_collect_candidate_urls_skips_sitemap_robots_disallows(cache, fetc
     assert urls == []
 
 
+async def test_collect_candidate_urls_sitemap_fetch_error_skips_but_continues(cache, settings):
+    """A FetchError on one sitemap_urls entry must not stop the others
+    from being read."""
+    good_sitemap = "https://www.ashworthholme.co.uk/sitemap-good.xml"
+    bad_sitemap = "https://www.ashworthholme.co.uk/sitemap-bad.xml"
+    cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        good_sitemap,
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.ashworthholme.co.uk/property/1</loc></url>
+        </urlset>""",
+    )
+    # bad_sitemap is deliberately left uncached so Fetcher.get() must call
+    # the backend, which always raises.
+    fetcher = Fetcher(settings, cache, _FlakyBackend())
+    recipe = make_recipe(
+        domain="ashworthholme.co.uk",
+        sitemap_urls=[bad_sitemap, good_sitemap],
+        listing_index_urls=[],
+    )
+
+    urls = await collect_candidate_urls(recipe, fetcher=fetcher)
+
+    assert "https://www.ashworthholme.co.uk/property/1" in urls
+
+
+async def test_collect_candidate_urls_child_sitemap_fetch_error_skips_but_continues(
+    cache, settings
+):
+    """A FetchError on one child of a sitemap index must not stop the
+    other children from being read."""
+    cache.put("https://jaksandco.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://jaksandco.co.uk/sitemap-index.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap><loc>https://jaksandco.co.uk/sitemap-bad.xml</loc></sitemap>
+          <sitemap><loc>https://jaksandco.co.uk/sitemap-good.xml</loc></sitemap>
+        </sitemapindex>""",
+    )
+    cache.put("https://jaksandco.co.uk/sitemap-good.xml", 200, "application/xml", SITEMAP_PROPERTY)
+    # sitemap-bad.xml is deliberately left uncached.
+    fetcher = Fetcher(settings, cache, _FlakyBackend())
+    recipe = make_recipe(
+        domain="jaksandco.co.uk",
+        sitemap_urls=["https://jaksandco.co.uk/sitemap-index.xml"],
+        listing_index_urls=[],
+    )
+
+    urls = await collect_candidate_urls(recipe, fetcher=fetcher)
+
+    assert "https://jaksandco.co.uk/property/12345" in urls
+
+
+async def test_collect_candidate_urls_listing_index_fetch_error_stops_pagination(cache, settings):
+    """A FetchError fetching a later page of a paginated listing index
+    must stop pagination there (same as a RobotsDisallowed break), not
+    propagate and abort collection entirely."""
+    from nimbus.models import PaginationRule
+
+    index_url = "https://www.jaksandco.co.uk/find-a-property/?department=residential-sales"
+    cache.put("https://www.jaksandco.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        index_url,
+        200,
+        "text/html",
+        '<html><body><a href="/property/one/">One</a></body></html>',
+    )
+    # page 2 is deliberately left uncached, so fetching it raises.
+    fetcher = Fetcher(settings, cache, _FlakyBackend())
+    recipe = make_recipe(
+        domain="jaksandco.co.uk",
+        sitemap_urls=[],
+        listing_index_urls=[index_url],
+        listing_url_patterns=["/property/*"],
+        pagination=PaginationRule(kind="path", param=None, max_pages=5),
+    )
+
+    urls = await collect_candidate_urls(recipe, fetcher=fetcher)
+
+    assert urls == ["https://www.jaksandco.co.uk/property/one/"]
+
+
 async def test_crawl_site_honours_crawl_delay(cache, fetcher):
     cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
     cache.put(
@@ -336,7 +435,7 @@ async def test_crawl_site_skips_a_page_that_errors_on_fetch_without_failing_the_
     sample URLs that "errored on fetch". One such failure must not abort
     the rest of the crawl."""
 
-    class _FlakyBackend:
+    class _SelectivelyFlakyBackend:
         async def fetch(self, url: str, *, timeout: float) -> RawResponse:
             if url.endswith("/property/bad"):
                 raise RuntimeError("connection reset by peer")
@@ -359,7 +458,7 @@ async def test_crawl_site_skips_a_page_that_errors_on_fetch_without_failing_the_
         listing_index_urls=[],
         listing_url_patterns=["/property/*"],
     )
-    fetcher = Fetcher(settings, cache, _FlakyBackend())
+    fetcher = Fetcher(settings, cache, _SelectivelyFlakyBackend())
 
     records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
@@ -391,10 +490,83 @@ async def test_crawl_site_raises_nothing_when_all_candidates_disallowed(cache, f
     assert records == []
 
 
+async def test_crawl_site_logs_error_summary_when_every_candidate_fails(cache, fetcher, caplog):
+    """ "This site has nothing new tonight" and "every fetch failed" must
+    not be indistinguishable in the logs. When there were candidate
+    listing URLs but none produced a record, the summary line is an
+    ERROR, not a WARNING."""
+    cache.put("https://www.henstockps.co.uk/robots.txt", 200, "text/plain", HENSTOCK_ROBOTS)
+    cache.put(
+        "https://www.henstockps.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.henstockps.co.uk/property/bedrooms/3</loc></url>
+        </urlset>""",
+    )
+    recipe = make_recipe(
+        domain="henstockps.co.uk",
+        sitemap_urls=["https://www.henstockps.co.uk/sitemap.xml"],
+        listing_index_urls=[],
+        listing_url_patterns=["/property/*"],
+    )
+
+    with caplog.at_level(logging.INFO, logger="nimbus.crawler"):
+        records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+
+    assert records == []
+    summary = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert summary, "expected an ERROR summary line when every candidate failed"
+    assert "henstockps.co.uk" in summary[0].getMessage()
+
+
+async def test_crawl_site_logs_info_summary_on_a_normal_run(cache, fetcher, caplog):
+    cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://www.ashworthholme.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.ashworthholme.co.uk/property/1</loc></url>
+        </urlset>""",
+    )
+    cache.put(
+        "https://www.ashworthholme.co.uk/property/1", 200, "text/html", "<html>listing 1</html>"
+    )
+    recipe = make_recipe(
+        domain="ashworthholme.co.uk",
+        sitemap_urls=["https://www.ashworthholme.co.uk/sitemap.xml"],
+        listing_index_urls=[],
+        listing_url_patterns=["/property/*"],
+    )
+
+    with caplog.at_level(logging.INFO, logger="nimbus.crawler"):
+        records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+
+    assert len(records) == 1
+    summary = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert summary, "expected an INFO summary line on a normal run"
+    assert "ashworthholme.co.uk" in summary[0].getMessage()
+    assert not any(r.levelno == logging.ERROR for r in caplog.records)
+
+
 def test_crawler_module_imports_no_llm_client():
+    """Checks only the module's actual import statements, not the whole
+    file -- banning the bare substring anywhere in the file is brittle
+    (it already produced a false positive against this module's own
+    docstring prose) and is not what the architectural claim is about.
+    The claim is specifically that nothing in this module *imports* an
+    LLM client; a comment or docstring that merely mentions one by name
+    is not a violation."""
     src = Path("src/nimbus/crawler.py").read_text()
-    assert "anthropic" not in src
-    assert "claude_agent_sdk" not in src
+    import_lines = [
+        line for line in src.splitlines() if line.strip().startswith(("import ", "from "))
+    ]
+    assert import_lines, "expected at least one import statement to check"
+    assert not any("anthropic" in line for line in import_lines)
+    assert not any("claude_agent_sdk" in line for line in import_lines)
 
 
 async def test_robots_disallowed_is_importable_for_catching(fetcher):

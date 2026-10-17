@@ -20,14 +20,15 @@ Three functions:
   `SiteRecipe`, it keeps only the ones matching `recipe.listing_url_patterns`,
   de-duplicating while preserving order.
 - `collect_candidate_urls` walks the recipe's declared sources -- sitemaps
-  first (expanding one level of sitemap index, same convention as
-  `mcp_server.get_sitemap`), falling back to `listing_index_urls` walked
-  through `recipe.pagination` when a site has no sitemap at all (the
-  jaksandco.co.uk case). It returns the unfiltered superset of URLs found;
-  `select_listing_urls` narrows that down to actual listing pages.
+  first (expanding one level of sitemap index, via the sitemap parsing
+  `nimbus.fetch.sitemap` shares with `mcp_server.get_sitemap`), falling
+  back to `listing_index_urls` walked through `recipe.pagination` when a
+  site has no sitemap at all (the jaksandco.co.uk case). It returns the
+  unfiltered superset of URLs found; `select_listing_urls` narrows that
+  down to actual listing pages.
 - `crawl_site` ties the two together and fetches each selected listing URL,
   honouring a caller-supplied `crawl_delay` between fetches and skipping (not
-  failing the run on) any URL robots.txt disallows.
+  failing the run on) any URL robots.txt disallows or any `FetchError`.
 
 Crawl delay is deliberately not read off the recipe: it is live robots.txt
 policy that can change week to week, so the caller resolves it fresh via
@@ -48,26 +49,11 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
+from nimbus.fetch.fetcher import Fetcher, FetchError, RobotsDisallowed
+from nimbus.fetch.sitemap import is_sitemap_index, locs
 from nimbus.models import CrawlRecord, PaginationRule, SiteRecipe
 
 logger = logging.getLogger(__name__)
-
-
-def _strip_ns(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _locs(root: ET.Element) -> list[str]:
-    """`<loc>` text of each direct child element of a parsed sitemap,
-    whether `root` is a `<urlset>` (children are `<url>`) or a
-    `<sitemapindex>` (children are `<sitemap>`) -- both wrap a `<loc>`."""
-    out: list[str] = []
-    for entry in root:
-        for child in entry:
-            if _strip_ns(child.tag) == "loc" and child.text:
-                out.append(child.text.strip())
-    return out
 
 
 def _extract_links(html: str, base_url: str) -> list[str]:
@@ -119,7 +105,7 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
         except RobotsDisallowed:
             logger.warning("robots disallows sitemap %s; skipping", root_url)
             continue
-        except Exception:
+        except FetchError:
             logger.warning("failed to fetch sitemap %s; skipping", root_url, exc_info=True)
             continue
 
@@ -129,17 +115,17 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
             logger.warning("sitemap %s is not valid XML; skipping", root_url)
             continue
 
-        if _strip_ns(root.tag) == "sitemapindex":
+        if is_sitemap_index(root):
             # Expand one level, same convention as mcp_server.get_sitemap:
             # fetch each child sitemap and take its <loc> entries, but do
             # not recurse into further indexes.
-            for child_loc in _locs(root):
+            for child_loc in locs(root):
                 try:
                     child_page = await fetcher.get(child_loc)
                 except RobotsDisallowed:
                     logger.warning("robots disallows child sitemap %s; skipping", child_loc)
                     continue
-                except Exception:
+                except FetchError:
                     logger.warning(
                         "failed to fetch child sitemap %s; skipping", child_loc, exc_info=True
                     )
@@ -149,9 +135,9 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
                 except ET.ParseError:
                     logger.warning("child sitemap %s is not valid XML; skipping", child_loc)
                     continue
-                urls.extend(_locs(child_root))
+                urls.extend(locs(child_root))
         else:
-            urls.extend(_locs(root))
+            urls.extend(locs(root))
 
     return urls
 
@@ -167,7 +153,7 @@ async def _collect_from_listing_index(recipe: SiteRecipe, fetcher: Fetcher) -> l
             except RobotsDisallowed:
                 logger.warning("robots disallows listing index %s; skipping", page_url)
                 break
-            except Exception:
+            except FetchError:
                 logger.warning(
                     "failed to fetch listing index %s; skipping", page_url, exc_info=True
                 )
@@ -240,10 +226,13 @@ async def crawl_site(
     (`await fetcher.robots_for(domain)`) rather than frozen into the
     recipe, per pre-flight ruling R5, and is awaited via `sleep` between
     fetches (not before the first one). A URL robots.txt disallows, or any
-    other single-URL fetch failure (timeout, too-many-redirects, a flaky
-    listing page -- real sites have these; bentleyhurst.co.uk's own recipe
-    notes two sample URLs that "errored on fetch"), is logged and skipped.
-    One bad URL must never abort an entire site's nightly crawl.
+    `FetchError` (timeout, too-many-redirects, a flaky listing page -- real
+    sites have these; bentleyhurst.co.uk's own recipe notes two sample
+    URLs that "errored on fetch"), is logged and skipped. One bad URL must
+    never abort an entire site's nightly crawl; any exception other than
+    those two (a bug in this module, a corrupted cache entry, ...) still
+    propagates, since silently swallowing *that* would hide a real defect
+    behind the exact same log line as routine site flakiness.
     """
     candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
     listing_urls = select_listing_urls(candidates, recipe)
@@ -251,6 +240,8 @@ async def crawl_site(
         listing_urls = listing_urls[:limit]
 
     records: list[CrawlRecord] = []
+    skipped_robots = 0
+    skipped_errors = 0
     for index, url in enumerate(listing_urls):
         if index > 0:
             await sleep(crawl_delay)
@@ -260,9 +251,11 @@ async def crawl_site(
             page = await fetcher.get(url)
         except RobotsDisallowed:
             logger.warning("robots disallows listing page %s; skipping", url)
+            skipped_robots += 1
             continue
-        except Exception:
+        except FetchError:
             logger.warning("failed to fetch listing page %s; skipping", url, exc_info=True)
+            skipped_errors += 1
             continue
 
         content_hash = hashlib.sha256(page.body.encode("utf-8")).hexdigest()
@@ -274,6 +267,31 @@ async def crawl_site(
                 fetched_at=page.fetched_at,
                 content_hash=content_hash,
             )
+        )
+
+    # One summary line per run, at a severity that actually distinguishes
+    # "this site genuinely has nothing new tonight" from "every fetch
+    # failed" -- across hundreds of sites, those two must not look
+    # identical in the logs with only per-URL WARNINGs to tell them apart.
+    if listing_urls and not records:
+        logger.error(
+            "crawl_site(%s): all %d candidate listing URL(s) failed or were disallowed "
+            "(skipped_robots=%d, skipped_errors=%d)",
+            recipe.domain,
+            len(listing_urls),
+            skipped_robots,
+            skipped_errors,
+        )
+    else:
+        logger.info(
+            "crawl_site(%s): %d candidate(s), %d selected, %d fetched "
+            "(skipped_robots=%d, skipped_errors=%d)",
+            recipe.domain,
+            len(candidates),
+            len(listing_urls),
+            len(records),
+            skipped_robots,
+            skipped_errors,
         )
 
     return records
