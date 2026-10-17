@@ -123,9 +123,7 @@ def cache(tmp_path, backend, settings) -> HtmlCache:
     html_cache = HtmlCache(root=tmp_path / "html-cache")
 
     # Henstock: robots.txt disallows */bedrooms/ for everyone.
-    html_cache.put(
-        "https://www.henstockps.co.uk/robots.txt", 200, "text/plain", HENSTOCK_ROBOTS
-    )
+    html_cache.put("https://www.henstockps.co.uk/robots.txt", 200, "text/plain", HENSTOCK_ROBOTS)
 
     # Ashworth Holme: allow-all robots.txt, one cached listing page.
     html_cache.put(
