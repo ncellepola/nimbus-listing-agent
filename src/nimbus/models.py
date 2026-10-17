@@ -50,6 +50,12 @@ class Listing(BaseModel):
     agent_name: str | None = None
     listed_date: date | None = None
     content_hash: str
+    # Set by storage, not by the extractor: when this listing was first
+    # reported withdrawn. Rows are never deleted, so this is what stops a
+    # withdrawal being re-reported every night and keeps gone listings out
+    # of the mass-withdrawal denominator. Cleared automatically if the URL
+    # reappears in a later run (a relist).
+    withdrawn_at: datetime | None = None
 
     @field_validator("postcode")
     @classmethod

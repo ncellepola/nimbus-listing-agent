@@ -254,6 +254,7 @@ def _row_to_listing(row: sqlite3.Row) -> Listing:
         agent_name=row["agent_name"],
         listed_date=row["listed_date"],
         content_hash=row["content_hash"],
+        withdrawn_at=(datetime.fromisoformat(row["withdrawn_at"]) if row["withdrawn_at"] else None),
     )
 
 
@@ -269,15 +270,39 @@ def get_listing(conn: sqlite3.Connection, source_url: str) -> Listing | None:
     return _row_to_listing(row)
 
 
-def list_listings(conn: sqlite3.Connection, domain: str) -> list[Listing]:
-    """Every listing currently stored for `domain`, regardless of whether
-    it appeared in the most recent crawl — this is the "what we already
-    knew" side of a nightly delta."""
-    rows = conn.execute(
-        "SELECT * FROM listings WHERE source_domain = ? ORDER BY source_url",
-        (domain,),
-    ).fetchall()
+def list_listings(
+    conn: sqlite3.Connection, domain: str, *, include_withdrawn: bool = False
+) -> list[Listing]:
+    """Every *live* listing stored for `domain` — the "what we already
+    knew" side of a nightly delta.
+
+    Listings already reported withdrawn are excluded by default. They are
+    never deleted (their price history up to withdrawal is worth keeping),
+    but leaving them in this result had two consequences: `apply_delta`
+    re-reported the same withdrawal every single night, and withdrawn URLs
+    stayed in the denominator of the mass-withdrawal fraction, so once
+    cumulative withdrawals passed half a domain's rows the guard latched
+    permanently shut. Pass `include_withdrawn=True` for an audit view.
+    """
+    sql = "SELECT * FROM listings WHERE source_domain = ?"
+    if not include_withdrawn:
+        sql += " AND withdrawn_at IS NULL"
+    rows = conn.execute(sql + " ORDER BY source_url", (domain,)).fetchall()
     return [_row_to_listing(row) for row in rows]
+
+
+def mark_withdrawn(conn: sqlite3.Connection, source_urls: list[str]) -> None:
+    """Stamp `withdrawn_at` on each URL that does not already carry one.
+    Idempotent: a listing keeps the timestamp of the night it first went,
+    not of the most recent run that noticed."""
+    if not source_urls:
+        return
+    now = datetime.now(UTC).isoformat()
+    conn.executemany(
+        "UPDATE listings SET withdrawn_at = ? WHERE source_url = ? AND withdrawn_at IS NULL",
+        [(now, url) for url in source_urls],
+    )
+    conn.commit()
 
 
 def upsert_listing(conn: sqlite3.Connection, listing: Listing) -> None:
@@ -321,7 +346,11 @@ def upsert_listing(conn: sqlite3.Connection, listing: Listing) -> None:
             agent_name = excluded.agent_name,
             listed_date = excluded.listed_date,
             content_hash = excluded.content_hash,
-            last_seen_at = excluded.last_seen_at
+            last_seen_at = excluded.last_seen_at,
+            -- A URL that is live again is not withdrawn any more. Without
+            -- this a relisted property would stay invisible to
+            -- list_listings forever.
+            withdrawn_at = NULL
         """,
         {
             "source_domain": listing.source_domain,

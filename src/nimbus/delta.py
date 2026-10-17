@@ -154,8 +154,13 @@ def apply_delta(
     - A `source_url` seen before with the same price is `unchanged`.
     - A previously stored `source_url` for `domain` that is absent from
       `listings` entirely is `withdrawn` — the listing used to be live and
-      is not any more. Its stored row is left as-is (not deleted), so its
-      history up to withdrawal is preserved.
+      is not any more. Its row is stamped with `withdrawn_at` rather than
+      deleted, so its history up to withdrawal is preserved, it is not
+      re-reported as newly withdrawn every subsequent night, and it drops
+      out of the denominator of the mass-withdrawal fraction (left in, a
+      domain whose cumulative withdrawals passed half its rows would latch
+      the guard permanently shut). A URL that reappears in a later run has
+      the stamp cleared by `storage.upsert_listing`.
 
     If the listings that would be withdrawn are more than half of what
     was previously stored for `domain` (and at least one listing was
@@ -239,6 +244,7 @@ def apply_delta(
                 len(proposed_withdrawn),
                 stored_count,
             )
+        storage.mark_withdrawn(conn, proposed_withdrawn)
         report.withdrawn = proposed_withdrawn
 
     return report

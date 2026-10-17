@@ -89,10 +89,12 @@ def test_apply_delta_is_idempotent(tmp_path):
     assert r2.new == []
     assert set(r2.unchanged) == {listing.source_url for listing in listings}
     assert r2.price_changed == []
-    # GONE_URL dropped out of every run from the first apply_delta call
-    # onward, so it is reported withdrawn both times, not just once.
+    # GONE_URL dropped out on the first call and is reported withdrawn
+    # exactly once. The second call does not re-report it: the first one
+    # stamped `withdrawn_at`, which is what stops an orchestrator being
+    # told the same listing vanished again every night for a year.
     assert r1.withdrawn == [GONE_URL]
-    assert r2.withdrawn == [GONE_URL]
+    assert r2.withdrawn == []
     # A second application with the same prices must not duplicate the
     # price_changed history row the first application already wrote.
     assert history_rows(conn, CHANGED_URL) == [(450_000, 425_000)]
@@ -318,3 +320,78 @@ def test_a_crawl_whose_extraction_never_ran_cannot_authorise_withdrawal():
     call raised, or the step was skipped). An empty `listings` list from
     "extraction never happened" must never read as "nothing is live"."""
     assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=10), []) is False
+
+
+# --------------------------------------------------------------------------
+# Withdrawal is persisted. It was reported and then forgotten, so the same
+# listings were re-reported withdrawn every night, and -- worse -- they
+# stayed in the denominator of the mass-withdrawal fraction, which meant a
+# domain whose cumulative withdrawals passed half its rows latched the
+# guard permanently shut.
+# --------------------------------------------------------------------------
+
+
+def test_a_withdrawal_is_reported_once_and_then_stops(tmp_path):
+    conn = init_db(tmp_path / "nimbus.db")
+    _seed_previous_run(conn)
+    survivors = [
+        make_listing(source_url=CHANGED_URL, price_gbp=450_000, content_hash="h1"),
+        make_listing(source_url=SAME_URL, price_gbp=300_000, content_hash="h2"),
+    ]
+
+    first = apply_delta(conn, DOMAIN, survivors)
+    second = apply_delta(conn, DOMAIN, survivors)
+
+    assert first.withdrawn == [GONE_URL]
+    assert second.withdrawn == []
+    gone = storage.get_listing(conn, GONE_URL)
+    assert gone is not None, "a withdrawn row is stamped, never deleted"
+    assert gone.withdrawn_at is not None
+    # And its price history survives the withdrawal.
+    assert storage.list_listings(conn, DOMAIN, include_withdrawn=True)
+
+
+def test_a_relisted_url_clears_its_withdrawal(tmp_path):
+    conn = init_db(tmp_path / "nimbus.db")
+    _seed_previous_run(conn)
+    survivors = [
+        make_listing(source_url=CHANGED_URL, price_gbp=450_000, content_hash="h1"),
+        make_listing(source_url=SAME_URL, price_gbp=300_000, content_hash="h2"),
+    ]
+    apply_delta(conn, DOMAIN, survivors)
+    assert storage.get_listing(conn, GONE_URL).withdrawn_at is not None
+
+    relisted = make_listing(source_url=GONE_URL, price_gbp=195_000, content_hash="h3b")
+    report = apply_delta(conn, DOMAIN, [*survivors, relisted])
+
+    assert storage.get_listing(conn, GONE_URL).withdrawn_at is None
+    assert GONE_URL not in report.withdrawn
+
+
+def test_the_guard_does_not_latch_shut_once_half_a_domain_has_been_withdrawn(tmp_path):
+    """Cumulative withdrawals used to stay in the denominator forever, so
+    after enough of a domain's history had gone, every subsequent run
+    looked like a mass withdrawal and nothing could ever be withdrawn
+    again."""
+    conn = init_db(tmp_path / "nimbus.db")
+    urls = _seed_five_listings(conn)
+
+    # Night one: three of five go, with the override granted.
+    apply_delta(
+        conn,
+        DOMAIN,
+        [make_listing(source_url=url, price_gbp=100_000, content_hash="h") for url in urls[3:]],
+        allow_mass_withdrawal=True,
+    )
+
+    # Night two: one of the two survivors goes. That is 1 of 2 live
+    # listings, not 4 of 5 stored ones -- a minority withdrawal, which
+    # must go through without needing an override.
+    report = apply_delta(
+        conn,
+        DOMAIN,
+        [make_listing(source_url=urls[4], price_gbp=100_000, content_hash="h")],
+    )
+
+    assert report.withdrawal_suppressed is False
+    assert report.withdrawn == [urls[3]]
