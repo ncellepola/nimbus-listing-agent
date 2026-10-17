@@ -1,0 +1,61 @@
+{
+  "domain": "jaksandco.co.uk",
+  "version": 1,
+  "discovered_at": "2026-10-17T07:20:37.137526Z",
+  "sitemap_urls": [],
+  "listing_index_urls": [
+    "https://www.jaksandco.co.uk/find-a-property/?department=residential-sales"
+  ],
+  "listing_url_patterns": [
+    "/property/*"
+  ],
+  "sample_listing_urls": [
+    "https://www.jaksandco.co.uk/property/grenfell-road-didsbury-manchester-m20-6tq/",
+    "https://www.jaksandco.co.uk/property/kingsway-manchester-m20-5ns/"
+  ],
+  "pagination": {
+    "kind": "path",
+    "param": null,
+    "max_pages": 5
+  },
+  "field_hints": [
+    {
+      "field": "address",
+      "css_selector": "h1",
+      "notes": "The H1 heading on the listing page is the full address, linked to the page's own URL, e.g. 'Grenfell Road, Didsbury, Manchester, M20 6TQ'. Separate street / town / postcode lines appear below the price."
+    },
+    {
+      "field": "price",
+      "css_selector": null,
+      "notes": "Shown just below the H1, e.g. '£475,000' with an optional qualifier on the next line ('Guide Price', 'Offers Over', 'OIRO'). Lettings show '£X pcm' instead, which is a useful way to reject them."
+    },
+    {
+      "field": "bedrooms",
+      "css_selector": null,
+      "notes": "Text 'N Bedrooms' in the summary block below the price."
+    },
+    {
+      "field": "bathrooms",
+      "css_selector": null,
+      "notes": "Text 'N Bathrooms' in the summary block. 'N Receptions' is also shown."
+    },
+    {
+      "field": "description",
+      "css_selector": null,
+      "notes": "Free text under the '#### Full Details' heading (Property Details tab)."
+    },
+    {
+      "field": "property_type",
+      "css_selector": null,
+      "notes": "Not seen in the opened part of the listing page. The index search form has a Type filter (Flat/Apartment, Semi-Detached House, Terraced House, etc.), so the data exists, but its location on the listing page was not confirmed."
+    },
+    {
+      "field": "agent_name",
+      "css_selector": null,
+      "notes": "Single-branch agent: Jaks & Co UK Limited, 673 Wilmslow Road, Didsbury, Manchester M20 6RA."
+    }
+  ],
+  "render_required": false,
+  "confidence": 0.75,
+  "notes": "No sitemap: robots.txt is only 'User-agent: *' with no rules and no Sitemap line, crawl_delay is 1.0, and /sitemap.xml returned no URLs. Use crawl_delay 1.0. The site runs on WordPress with what looks like the Property Hive plugin. The index /find-a-property/ shows mixed results by default (39 properties, the first page was all lettings); adding the query param department=residential-sales gave 16 sales listings. Lettings and sales share the /property/<slug>/ URL shape, so the pattern alone cannot tell them apart. Only follow /property/ links from the sales-filtered index, and also reject a page if its status label (just after the menu) is 'To Let', 'Let', or 'Let Agreed', or if its price contains 'pcm'. Sales labels seen: 'For Sale' and 'Sold STC' (decide downstream whether to keep Sold STC). Pagination is by path: /find-a-property/page/N/?department=residential-sales. Quirk: page 1 said 'Showing 1–12 of 16' but showed all 16 cards; page 2 said 'Showing 13–16 of 16' but rendered no cards ('It seems we can't find what you're looking for'). Stop paging when a page has no /property/ links, and deduplicate URLs. Host is www.jaksandco.co.uk (the homepage links use www); some slugs end in -2, so don't assume slugs are unique per address. A 'Commercial' tab exists in the search form; it was not explored, but the sales filter appears to exclude it. Listing pages are fully server-rendered. Brochure PDFs are linked at /wp-content/uploads/*.pdf. Tenure and property type were not confirmed on listing pages because the fetch output was truncated."
+}

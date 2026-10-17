@@ -1,0 +1,9 @@
+{
+  "domain": "ashworthholme.co.uk",
+  "version": 1,
+  "sitemap_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34612724/-/sale/alcester-road"
+  ]
+  "listing_url_patterns": ["/property-details/*"],
+  "confidence": 0.9,
+}

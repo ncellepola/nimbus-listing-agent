@@ -1,0 +1,69 @@
+{
+  "domain": "ashworthholme.co.uk",
+  "version": 1,
+  "discovered_at": "2026-10-17T06:49:09.546224Z",
+  "sitemap_urls": [
+    "https://www.ashworthholme.co.uk/sitemap.xml"
+  ],
+  "listing_index_urls": [
+    "https://www.ashworthholme.co.uk/search/?showstc=off&showsold=off&instruction_type=Sale"
+  ],
+  "listing_url_patterns": [
+    "/property-details/*/*/*/*"
+  ],
+  "sample_listing_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34887120/-/sale/sherbrooke-close",
+    "https://www.ashworthholme.co.uk/property-details/34779574/-/manchester/cherry-tree-road",
+    "https://www.ashworthholme.co.uk/property-details/34514390/-/sale/flat-6-1"
+  ],
+  "pagination": {
+    "kind": "none",
+    "param": null,
+    "max_pages": 1
+  },
+  "field_hints": [
+    {
+      "field": "address",
+      "css_selector": "h1",
+      "notes": "H1 holds the street and town, e.g. 'Sherbrooke Close, Sale'. The page <title> has the format 'Street, Town, N bedroom, Property Type'."
+    },
+    {
+      "field": "price",
+      "css_selector": "h2",
+      "notes": "The H2 below the H1 has a status line plus the price: 'For Sale £850,000', 'Sold Subject to Contract £415,000' or 'To Let Per Calendar Month £1,000 PCM'. Use this status text to separate sales from lettings."
+    },
+    {
+      "field": "bedrooms",
+      "css_selector": null,
+      "notes": "First of three bold numbers right after the price heading. The page title also says 'N bedroom'."
+    },
+    {
+      "field": "bathrooms",
+      "css_selector": null,
+      "notes": "Second of the three bold numbers after the price. The third is probably reception rooms. Order inferred from samples, not confirmed against labels."
+    },
+    {
+      "field": "property_type",
+      "css_selector": "title",
+      "notes": "Last comma-separated part of the <title>, e.g. 'House - Detached', 'Apartment', 'Office'."
+    },
+    {
+      "field": "description",
+      "css_selector": "#property-long-description",
+      "notes": "Long description followed by a bullet list of features. Section is reached via the in-page 'Details' anchor."
+    },
+    {
+      "field": "tenure",
+      "css_selector": null,
+      "notes": "Not a structured field. Sometimes appears in the feature bullets ('Freehold') or in the description text ('Ground Rent', 'Service Charge')."
+    },
+    {
+      "field": "agent_name",
+      "css_selector": null,
+      "notes": "Single-branch agent: Ashworth Holme, 2-4 Washway Road, Sale M33 7QY, tel 0161 973 6680."
+    }
+  ],
+  "render_required": false,
+  "confidence": 0.7,
+  "notes": "Use the sitemap as the source and fetch each /property-details/ URL at 1s crawl delay. 1) The town segment in these URLs is often 'sale' because the agent is based in Sale, Greater Manchester. It does NOT mean the listing is for sale, so never filter on it. 2) Lettings and commercial listings use the same URL pattern and appear in the sitemap. Example: /property-details/34920662/cheshire/altrincham/office-1314 is an office to let at £1,000 PCM, with property type 'Office' and a lettings logo (ashworth_lettings_logo). The crawler must classify each page by content: keep it only if the price heading contains 'For Sale' or 'Sold Subject to Contract'. Drop it if the heading contains 'To Let' or 'PCM', or if the property type is 'Office'. Other lettings likely appear under the same pattern; I only confirmed the office one. 3) Many sitemap entries are Sold STC, shown by a 'SOLDSTC' badge and 'Sold Subject to Contract' in the price heading. Decide whether to keep or flag these. 4) The search index (/search/?showstc=off&showsold=off&instruction_type=Sale) reported 60 results but showed only 10, and adding &page=2 returned the same 10. Pagination param unknown, so the index is not usable for full discovery. It is listed only for reference. 5) Static sitemap pages to skip: /about-us/, /contact-us/, /register/, /lettings/, /stamp-duty-calculator.html. 6) Page content is in the server-rendered HTML; only the map needs JavaScript."
+}

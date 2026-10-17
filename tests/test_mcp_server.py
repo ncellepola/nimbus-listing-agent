@@ -22,6 +22,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 HENSTOCK_ROBOTS = (FIXTURES / "robots" / "henstock.txt").read_text()
 SITEMAP_INDEX = (FIXTURES / "sitemaps" / "index.xml").read_text()
 SITEMAP_PROPERTY = (FIXTURES / "sitemaps" / "property.xml").read_text()
+# 25 property-to-rent URLs followed by 25 property-for-sale URLs: the
+# bentleyhurst.co.uk case in miniature (396 rentals, then 679 sales, in
+# one 1075-URL sitemap) that broke discovery when get_sitemap only
+# sampled the head of the list.
+SITEMAP_MIXED_CATEGORIES = (FIXTURES / "sitemaps" / "mixed_categories.xml").read_text()
 
 CACHED_URL = "https://www.ashworthholme.co.uk/property/123"
 
@@ -155,6 +160,22 @@ def cache(tmp_path, backend, settings) -> HtmlCache:
         SITEMAP_PROPERTY,
     )
 
+    # Bentley Hurst: allow-all robots.txt with no Sitemap directive, so
+    # get_sitemap falls back to the default /sitemap.xml location, which
+    # groups every rental ahead of every sale listing.
+    html_cache.put(
+        "https://www.bentleyhurst.co.uk/robots.txt",
+        200,
+        "text/plain",
+        "User-agent: *\nAllow: /\n",
+    )
+    html_cache.put(
+        "https://www.bentleyhurst.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        SITEMAP_MIXED_CATEGORIES,
+    )
+
     return html_cache
 
 
@@ -200,7 +221,39 @@ async def test_get_sitemap_expands_sitemap_index(get_sitemap):
     out = await get_sitemap("jaksandco.co.uk")
 
     assert out["url_count"] > 0
+    assert any("/property" in u for u in out["urls"])
     assert any("/property" in u for u in out["sample_urls"])
+    assert out["sitemap_roots"] == ["https://jaksandco.co.uk/sitemap-index.xml"]
+
+
+async def test_get_sitemap_sample_spreads_across_mixed_categories(get_sitemap):
+    # Head sampling would return only the first 25 URLs, which are all
+    # property-to-rent -- exactly the bug that broke a live discovery run.
+    out = await get_sitemap("www.bentleyhurst.co.uk")
+
+    assert any("property-to-rent" in u for u in out["sample_urls"])
+    assert any("property-for-sale" in u for u in out["sample_urls"])
+
+
+async def test_get_sitemap_sample_is_deterministic(get_sitemap):
+    first = await get_sitemap("www.bentleyhurst.co.uk")
+    second = await get_sitemap("www.bentleyhurst.co.uk")
+
+    assert first["sample_urls"] == second["sample_urls"]
+
+
+async def test_get_sitemap_sample_size_is_capped(get_sitemap):
+    out = await get_sitemap("www.bentleyhurst.co.uk")
+
+    assert out["url_count"] == 50
+    assert len(out["sample_urls"]) == 25
+
+
+async def test_get_sitemap_sample_returns_everything_when_shorter_than_cap(get_sitemap):
+    out = await get_sitemap("jaksandco.co.uk")
+
+    assert out["url_count"] < 25
+    assert out["sample_urls"] == out["urls"]
 
 
 async def test_fetch_page_markdown_is_smaller_than_html(fetch_page):
