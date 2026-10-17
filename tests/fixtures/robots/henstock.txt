@@ -1,0 +1,43 @@
+User-agent: *
+Crawl-delay: 2
+Disallow: */pdf
+Disallow: */bedrooms/
+Disallow: */min-bathrooms/
+Disallow: */from/
+Disallow: */upto/
+Disallow: /*?grid=
+Disallow: /*&grid=
+Disallow: /*?list=
+Disallow: /*&list=
+Disallow: /*?map=
+Disallow: /*&map=
+
+User-agent: SemrushBot
+Crawl-delay: 120
+Disallow: */pdf
+Disallow: */bedrooms/
+Disallow: */min-bathrooms/
+Disallow: */from/
+Disallow: */upto/
+Disallow: /*?grid=
+Disallow: /*&grid=
+Disallow: /*?list=
+Disallow: /*&list=
+Disallow: /*?map=
+Disallow: /*&map=
+
+User-agent: bingbot
+Crawl-delay: 30
+Disallow: */pdf
+Disallow: */bedrooms/
+Disallow: */min-bathrooms/
+Disallow: */from/
+Disallow: */upto/
+Disallow: /*?grid=
+Disallow: /*&grid=
+Disallow: /*?list=
+Disallow: /*&list=
+Disallow: /*?map=
+Disallow: /*&map=
+
+Sitemap: https://www.henstockps.co.uk/sitemap.xml
