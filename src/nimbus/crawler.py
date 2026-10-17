@@ -27,8 +27,10 @@ Three functions:
   unfiltered superset of URLs found; `select_listing_urls` narrows that
   down to actual listing pages.
 - `crawl_site` ties the two together and fetches each selected listing URL,
-  honouring a caller-supplied `crawl_delay` between fetches and skipping (not
-  failing the run on) any URL robots.txt disallows or any `FetchError`. It
+  honouring a caller-supplied `crawl_delay` between *every* fetch the run
+  makes -- candidate collection included, via a shared `Pacer` -- and
+  skipping (not failing the run on) any URL robots.txt disallows or any
+  `FetchError`. It
   returns a `CrawlOutcome`, not a bare list: the fetched `CrawlRecord`s plus
   candidate/selected/fetched/skipped counts an orchestration layer can
   write straight into `storage.crawl_runs` without re-crawling to recover
@@ -58,6 +60,34 @@ from nimbus.fetch.sitemap import is_sitemap_index, locs
 from nimbus.models import CrawlOutcome, CrawlRecord, PaginationRule, SiteRecipe
 
 logger = logging.getLogger(__name__)
+
+
+class Pacer:
+    """Enforces a crawl delay between consecutive fetches, across a whole
+    run rather than within one phase of it.
+
+    `crawl_site` used to sleep only between listing-page fetches, while
+    `collect_candidate_urls` fanned out across child sitemaps and
+    paginated index pages at full speed -- so every run opened with an
+    unpaced burst against exactly the sites most likely to have declared a
+    `Crawl-delay` in the first place. One `Pacer` threaded through both
+    phases also closes the gap at the boundary between them.
+
+    No sleep before the first fetch: a delay is a gap *between* requests.
+    """
+
+    def __init__(self, delay: float, sleep: Callable[[float], Awaitable[None]]) -> None:
+        self._delay = delay
+        self._sleep = sleep
+        self._started = False
+
+    async def wait(self) -> None:
+        if self._started and self._delay > 0:
+            await self._sleep(self._delay)
+        self._started = True
+
+
+_NO_DELAY = Pacer(0.0, asyncio.sleep)
 
 
 def _extract_links(html: str, base_url: str) -> list[str]:
@@ -101,9 +131,10 @@ def _paginated_url(url: str, pagination: PaginationRule | None, page: int) -> st
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
-async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[str]:
+async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher, pacer: Pacer) -> list[str]:
     urls: list[str] = []
     for root_url in recipe.sitemap_urls:
+        await pacer.wait()
         try:
             page = await fetcher.get(root_url)
         except RobotsDisallowed:
@@ -124,6 +155,7 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
             # fetch each child sitemap and take its <loc> entries, but do
             # not recurse into further indexes.
             for child_loc in locs(root):
+                await pacer.wait()
                 try:
                     child_page = await fetcher.get(child_loc)
                 except RobotsDisallowed:
@@ -146,12 +178,15 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
     return urls
 
 
-async def _collect_from_listing_index(recipe: SiteRecipe, fetcher: Fetcher) -> list[str]:
+async def _collect_from_listing_index(
+    recipe: SiteRecipe, fetcher: Fetcher, pacer: Pacer
+) -> list[str]:
     max_pages = recipe.pagination.max_pages if recipe.pagination is not None else 1
     urls: list[str] = []
     for index_url in recipe.listing_index_urls:
         for page in range(1, max_pages + 1):
             page_url = _paginated_url(index_url, recipe.pagination, page)
+            await pacer.wait()
             try:
                 fetched = await fetcher.get(page_url)
             except RobotsDisallowed:
@@ -174,7 +209,9 @@ async def _collect_from_listing_index(recipe: SiteRecipe, fetcher: Fetcher) -> l
     return urls
 
 
-async def collect_candidate_urls(recipe: SiteRecipe, *, fetcher: Fetcher) -> list[str]:
+async def collect_candidate_urls(
+    recipe: SiteRecipe, *, fetcher: Fetcher, pacer: Pacer | None = None
+) -> list[str]:
     """Every URL reachable from the recipe's declared sources, unfiltered.
 
     Sitemaps are tried first, when the recipe has any. A site with no
@@ -184,13 +221,20 @@ async def collect_candidate_urls(recipe: SiteRecipe, *, fetcher: Fetcher) -> lis
 
     Not yet narrowed to listing pages -- use `select_listing_urls` for
     that, against `recipe.listing_url_patterns`.
+
+    `pacer` applies the site's declared crawl delay between these fetches
+    too. It defaults to no delay so this function stays usable on its own,
+    but `crawl_site` always passes the same `Pacer` it uses for listing
+    pages: a run that politely spaces its 195 listing fetches and then
+    hammers a sitemap index has not been polite.
     """
+    pacer = pacer if pacer is not None else _NO_DELAY
     if recipe.sitemap_urls:
-        urls = await _collect_from_sitemaps(recipe, fetcher)
+        urls = await _collect_from_sitemaps(recipe, fetcher, pacer)
         if urls:
             return urls
 
-    return await _collect_from_listing_index(recipe, fetcher)
+    return await _collect_from_listing_index(recipe, fetcher, pacer)
 
 
 def _matches_any_pattern(url: str, patterns: list[str]) -> bool:
@@ -253,7 +297,8 @@ async def crawl_site(
     fetch or being disallowed (usually transient). See the comment above
     the logging calls below for the exact conditions.
     """
-    candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
+    pacer = Pacer(crawl_delay, sleep)
+    candidates = await collect_candidate_urls(recipe, fetcher=fetcher, pacer=pacer)
     # `selected_urls` is what the recipe implied; `listing_urls` is what
     # this run actually walks. They differ only under an explicit --limit,
     # and both numbers reach the CrawlOutcome: reporting the truncated
@@ -266,9 +311,8 @@ async def crawl_site(
     records: list[CrawlRecord] = []
     skipped_robots = 0
     skipped_errors = 0
-    for index, url in enumerate(listing_urls):
-        if index > 0:
-            await sleep(crawl_delay)
+    for url in listing_urls:
+        await pacer.wait()
 
         was_cached = fetcher.cache.get(url) is not None
         try:
