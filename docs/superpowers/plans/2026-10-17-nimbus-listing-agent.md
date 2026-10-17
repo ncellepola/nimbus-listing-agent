@@ -85,6 +85,8 @@ Branch `feat/fetch-robots-cache`, PR #1.
 
 Tables created by `init_db`: `sites`, `recipes`, `listings`, `listing_history`, `extraction_audit`, `crawl_runs`.
 
+`extraction_audit` must include `schema_valid INTEGER NOT NULL` and `needs_review INTEGER NOT NULL` alongside `model`, `prompt_version`, `recipe_version`, `html_hash`, `input_tokens`, `output_tokens`, `cost_usd`, `created_at`. Task 6 computes site health from those two columns, so they are not optional (pre-flight ruling R3).
+
 - [ ] **Step 1: Scaffold the project and CI**
 
 Create `pyproject.toml` (name `nimbus-listing-agent`, `requires-python = ">=3.12"`, `[tool.ruff] line-length = 100`, pytest markers `live`), `.gitignore` (include `.env`, `.cache/`, `*.db`), `.env.example`, `.pre-commit-config.yaml` (ruff + ruff-format), and `.github/workflows/ci.yml` running `uv sync`, `ruff check`, `ruff format --check`, `pytest -m "not live"` on Python 3.12.
@@ -120,11 +122,11 @@ def test_robots_missing_file_defaults_to_allow_with_default_delay():
 def test_cache_key_is_stable_and_roundtrips():
     ...  # same URL -> same key; put then get returns identical body
 
-def test_fetcher_raises_on_disallowed_url():
+async def test_fetcher_raises_on_disallowed_url():
     with pytest.raises(RobotsDisallowed):
         await fetcher.get("https://www.henstockps.co.uk/property/bedrooms/3")
 
-def test_fetcher_serves_cache_without_network():
+async def test_fetcher_serves_cache_without_network():
     # backend that raises if called; cache pre-populated; get() succeeds
 
 def test_listing_normalises_postcode_and_rejects_negative_price():
@@ -176,7 +178,8 @@ Branch `feat/mcp-fetch-server`, PR #2.
   - `async def get_robots(domain: str) -> dict` → `{"domain", "text", "crawl_delay", "sitemaps", "ai_signals", "fetchable"}`
   - `async def get_sitemap(domain: str, *, max_urls: int = 2000) -> dict` → `{"sitemap_urls", "url_count", "sample_urls"}`, recursively expanding `<sitemapindex>` one level
   - `async def fetch_page(url: str, as_markdown: bool = True, max_chars: int = 40000) -> dict` → `{"url", "status", "content", "truncated", "from_cache"}`, or `{"error": "robots_disallowed", ...}`
-  - `def build_server(fetcher: Fetcher) -> FastMCP`
+  - `def build_tools(fetcher: Fetcher) -> dict[str, Callable]` — returns the three tool callables bound to `fetcher`; tests exercise these directly without stdio (pre-flight ruling R1)
+  - `def build_server(fetcher: Fetcher) -> FastMCP` — registers what `build_tools` returns
   - `def main() -> None` — runs the server over stdio
 
 - [ ] **Step 1: Write the failing tests**
@@ -305,7 +308,7 @@ Run: `uv run pytest -m "not live" -v` → PASS.
 
 - [ ] **Step 7: Run the agent against all three sites for real and commit the recipes**
 
-Run: `uv run python -m nimbus.cli onboard ashworthholme.co.uk` (and the other two) once discovery is wired; save results to `tests/fixtures/recipes/<domain>.json` so later tasks and CI never need the agent.
+Run: `uv run python -m nimbus.discovery ashworthholme.co.uk --out tests/fixtures/recipes/ashworthholme.co.uk.json` (and the other two). Add a `__main__` block to `discovery.py` for this — the CLI does not exist until Task 7, so Task 3 must not depend on it (pre-flight ruling R6). Committing the recipes means later tasks and CI never need the agent.
 
 - [ ] **Step 8: Commit, PR #3, merge on green**
 
@@ -330,7 +333,9 @@ Branch `feat/recipe-crawler`, PR #4.
   - `models.CrawlRecord`: `url: str`, `html: str`, `from_cache: bool`, `fetched_at: datetime`, `content_hash: str`
   - `def select_listing_urls(urls: list[str], recipe: SiteRecipe) -> list[str]` — pure; filters by `listing_url_patterns`, de-duplicates, preserves order
   - `async def collect_candidate_urls(recipe: SiteRecipe, *, fetcher: Fetcher) -> list[str]` — sitemaps first, listing index + pagination as fallback
-  - `async def crawl_site(recipe: SiteRecipe, *, fetcher: Fetcher, limit: int | None = None, sleep=asyncio.sleep) -> list[CrawlRecord]`
+  - `async def crawl_site(recipe: SiteRecipe, *, fetcher: Fetcher, crawl_delay: float, limit: int | None = None, sleep=asyncio.sleep) -> list[CrawlRecord]`
+
+Crawl delay is passed in explicitly, resolved by the caller from `await fetcher.robots_for(domain)`. It is live site policy and must not be frozen into a recipe that may be weeks stale (pre-flight ruling R5).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -341,14 +346,14 @@ def test_select_listing_urls_filters_and_dedupes():
 
 async def test_crawl_site_honours_crawl_delay():
     delays = []
-    await crawl_site(recipe, fetcher=f, sleep=lambda d: delays.append(d))
+    await crawl_site(recipe, fetcher=f, crawl_delay=2.0, sleep=lambda d: delays.append(d))
     assert all(d >= 2.0 for d in delays)
 
 async def test_crawl_site_respects_limit():
-    assert len(await crawl_site(recipe, fetcher=f, limit=3)) == 3
+    assert len(await crawl_site(recipe, fetcher=f, crawl_delay=0.0, limit=3)) == 3
 
 async def test_crawl_site_skips_robots_disallowed_without_failing_the_run():
-    records = await crawl_site(recipe_including_disallowed_url, fetcher=f)
+    records = await crawl_site(recipe_including_disallowed_url, fetcher=f, crawl_delay=0.0)
     assert DISALLOWED not in [r.url for r in records]
 
 def test_crawler_module_imports_no_llm_client():
@@ -396,7 +401,8 @@ Branch `feat/llm-extractor`, PR #5.
   - `def parse_price(raw: str) -> tuple[int | None, str | None]` — returns `(pounds, qualifier)`
   - `def is_residential_sale(raw_text: str, listing: Listing) -> bool`
   - `async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) -> ExtractionResult`
-  - `def audit_row(record, recipe, result, *, model: str, input_tokens: int, output_tokens: int, cost_usd: float) -> dict`
+  - `def audit_row(record, recipe, result, *, model: str, input_tokens: int, output_tokens: int, cost_usd: float) -> dict` — includes `schema_valid` and `needs_review` (pre-flight ruling R3)
+  - `def record_extraction(conn, record, recipe, result, *, model: str, input_tokens: int, output_tokens: int, cost_usd: float) -> None` — composes `audit_row` and calls `storage.insert_audit`; this task owns audit persistence, Task 7 calls only this (pre-flight ruling R4)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -439,6 +445,12 @@ def test_audit_row_records_model_and_prompt_and_recipe_versions():
     assert row["prompt_version"] == EXTRACT_PROMPT_VERSION
     assert row["recipe_version"] == recipe.version
     assert row["html_hash"] == record.content_hash
+    assert row["schema_valid"] is True and row["needs_review"] is False
+
+def test_record_extraction_persists_a_readable_audit_row():
+    record_extraction(conn, record, recipe, result, model="claude-sonnet-5",
+                      input_tokens=10, output_tokens=5, cost_usd=0.001)
+    assert audit_count(conn, record.url) == 1
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -551,7 +563,7 @@ Branch `feat/cli-and-demo`, PR #7.
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: CLI commands `onboard <domain>`, `crawl <domain> [--limit N]`, `heal <domain>`, `report [--domain D]`, `demo`.
+- Produces: a typer app with a global `--db PATH` option defaulting to `Settings.db_path` (pre-flight ruling R8), and commands `onboard <domain>`, `crawl <domain> [--limit N]`, `heal <domain>`, `report [--domain D]`, `demo [--offline]`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -570,6 +582,11 @@ def test_demo_runs_offline_from_fixtures():
     result = runner.invoke(app, ["demo", "--offline"])
     assert result.exit_code == 0
     assert "recipe repaired" in result.output.lower()
+
+def test_demo_offline_makes_no_agent_call():
+    # discover_site patched to raise; --offline must still succeed
+    result = runner.invoke(app, ["demo", "--offline"])
+    assert result.exit_code == 0
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -578,7 +595,7 @@ Run: `uv run pytest tests/test_cli.py -v` → FAIL.
 
 - [ ] **Step 3: Implement `cli.py`**
 
-Typer app. `demo --offline` runs the full narrative from fixtures with no network and no agent calls except the heal step: show a recipe, crawl, extract, report the delta, swap in the mutated pages, show the health rate collapse, run heal, show the version bump and the recovered extraction.
+Typer app. `demo --offline` runs the full narrative from fixtures with **no network and no agent call at all**: show a recipe, crawl from cache, extract, report the delta, swap in the mutated pages, show the health rate collapse, then drive the real diff-and-version-bump code path with `discover_site` stubbed by a committed post-heal recipe fixture (`tests/fixtures/recipes/<domain>.healed.json`), and show the recovered extraction. The live `heal` command runs the genuine agent. The spec names a network-dependent demo as an anti-goal, so the offline path must not call the agent (pre-flight ruling R7).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
