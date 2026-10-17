@@ -13,7 +13,7 @@ result, never as raw HTML, and the backend is never touched.
 
 `build_tools(fetcher)` returns the three callables bound to a fetcher, so
 tests can exercise them directly without going through stdio.
-`build_server(fetcher)` registers them on a `FastMCP` instance; `main()`
+`build_server(fetcher)` registers them on an `MCPServer` instance; `main()`
 wires up real settings/cache/backend and runs that server over stdio.
 """
 
@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from nimbus.config import Settings
 from nimbus.fetch.backends import CrawlbaseBackend, HttpxBackend
@@ -164,8 +164,8 @@ def build_tools(fetcher: Fetcher) -> dict[str, Callable]:
     }
 
 
-def build_server(fetcher: Fetcher) -> FastMCP:
-    server = FastMCP("nimbus-fetch")
+def build_server(fetcher: Fetcher) -> MCPServer:
+    server = MCPServer("nimbus-fetch")
     for name, fn in build_tools(fetcher).items():
         server.add_tool(fn, name=name)
     return server
