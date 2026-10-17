@@ -119,6 +119,9 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
         except RobotsDisallowed:
             logger.warning("robots disallows sitemap %s; skipping", root_url)
             continue
+        except Exception:
+            logger.warning("failed to fetch sitemap %s; skipping", root_url, exc_info=True)
+            continue
 
         try:
             root = ET.fromstring(page.body)
@@ -135,6 +138,11 @@ async def _collect_from_sitemaps(recipe: SiteRecipe, fetcher: Fetcher) -> list[s
                     child_page = await fetcher.get(child_loc)
                 except RobotsDisallowed:
                     logger.warning("robots disallows child sitemap %s; skipping", child_loc)
+                    continue
+                except Exception:
+                    logger.warning(
+                        "failed to fetch child sitemap %s; skipping", child_loc, exc_info=True
+                    )
                     continue
                 try:
                     child_root = ET.fromstring(child_page.body)
@@ -158,6 +166,11 @@ async def _collect_from_listing_index(recipe: SiteRecipe, fetcher: Fetcher) -> l
                 fetched = await fetcher.get(page_url)
             except RobotsDisallowed:
                 logger.warning("robots disallows listing index %s; skipping", page_url)
+                break
+            except Exception:
+                logger.warning(
+                    "failed to fetch listing index %s; skipping", page_url, exc_info=True
+                )
                 break
 
             links = _extract_links(fetched.body, page_url)
@@ -226,8 +239,11 @@ async def crawl_site(
     the loop. `crawl_delay` is resolved by the caller from live robots.txt
     (`await fetcher.robots_for(domain)`) rather than frozen into the
     recipe, per pre-flight ruling R5, and is awaited via `sleep` between
-    fetches (not before the first one). A URL robots.txt disallows is
-    logged and skipped -- it does not raise and does not abort the run.
+    fetches (not before the first one). A URL robots.txt disallows, or any
+    other single-URL fetch failure (timeout, too-many-redirects, a flaky
+    listing page -- real sites have these; bentleyhurst.co.uk's own recipe
+    notes two sample URLs that "errored on fetch"), is logged and skipped.
+    One bad URL must never abort an entire site's nightly crawl.
     """
     candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
     listing_urls = select_listing_urls(candidates, recipe)
@@ -244,6 +260,9 @@ async def crawl_site(
             page = await fetcher.get(url)
         except RobotsDisallowed:
             logger.warning("robots disallows listing page %s; skipping", url)
+            continue
+        except Exception:
+            logger.warning("failed to fetch listing page %s; skipping", url, exc_info=True)
             continue
 
         content_hash = hashlib.sha256(page.body.encode("utf-8")).hexdigest()

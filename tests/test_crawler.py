@@ -16,6 +16,7 @@ from conftest import make_recipe
 
 from nimbus.config import Settings
 from nimbus.crawler import collect_candidate_urls, crawl_site, select_listing_urls
+from nimbus.fetch.backends import RawResponse
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
 from nimbus.models import CrawlRecord
@@ -325,6 +326,46 @@ async def test_crawl_site_produces_crawl_records_with_hash_and_cache_flag(cache,
     assert record.from_cache is True
     assert record.content_hash
     assert record.fetched_at is not None
+
+
+async def test_crawl_site_skips_a_page_that_errors_on_fetch_without_failing_the_run(
+    cache, settings
+):
+    """Real sites occasionally error on a specific listing URL (timeouts,
+    too-many-redirects, 5xx) -- bentleyhurst.co.uk's own recipe notes two
+    sample URLs that "errored on fetch". One such failure must not abort
+    the rest of the crawl."""
+
+    class _FlakyBackend:
+        async def fetch(self, url: str, *, timeout: float) -> RawResponse:
+            if url.endswith("/property/bad"):
+                raise RuntimeError("connection reset by peer")
+            return RawResponse(status=200, content_type="text/html", body="<html>ok</html>")
+
+    cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://www.ashworthholme.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.ashworthholme.co.uk/property/bad</loc></url>
+          <url><loc>https://www.ashworthholme.co.uk/property/good</loc></url>
+        </urlset>""",
+    )
+    recipe = make_recipe(
+        domain="ashworthholme.co.uk",
+        sitemap_urls=["https://www.ashworthholme.co.uk/sitemap.xml"],
+        listing_index_urls=[],
+        listing_url_patterns=["/property/*"],
+    )
+    fetcher = Fetcher(settings, cache, _FlakyBackend())
+
+    records = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+
+    urls = [r.url for r in records]
+    assert "https://www.ashworthholme.co.uk/property/bad" not in urls
+    assert "https://www.ashworthholme.co.uk/property/good" in urls
 
 
 async def test_crawl_site_raises_nothing_when_all_candidates_disallowed(cache, fetcher):
