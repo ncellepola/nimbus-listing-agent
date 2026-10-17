@@ -46,6 +46,18 @@ from nimbus.models import SiteRecipe
 DISCOVERY_PROMPT_VERSION = "v1"
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "discovery.md"
+
+# src/nimbus/discovery.py -> nimbus -> src -> repo root (where pyproject.toml
+# and .env live). Computed from this module's own location, not the
+# process's cwd, so the MCP stdio subprocess's own `Settings()` can find
+# `.env` no matter where `discover_site`/`python -m nimbus.discovery` was
+# invoked from.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+assert (_REPO_ROOT / "pyproject.toml").is_file(), (
+    f"_REPO_ROOT resolved to {_REPO_ROOT}, which has no pyproject.toml; "
+    "the src/nimbus/ layout this offset assumes has changed"
+)
+
 _MCP_SERVER_NAME = "nimbus-fetch"
 _MCP_TOOL_NAMES = ("get_robots", "get_sitemap", "fetch_page")
 
@@ -188,11 +200,16 @@ def _mcp_server_options(settings: Settings, max_turns: int, api_key: str):
         # the only tools left to approve.
         allowed_tools=[f"mcp__{_MCP_SERVER_NAME}__{name}" for name in _MCP_TOOL_NAMES],
         max_turns=max_turns,
-        # `Settings()` reads `.env` relative to process cwd (pydantic-settings
-        # does not touch os.environ), so pinning cwd makes the whole chain
-        # work the same regardless of where discover_site was invoked from,
-        # not just when it happens to be the repo root already.
-        cwd=str(Path.cwd()),
+        # `cwd=None` (the default) just inherits the parent process's cwd,
+        # which is a no-op here, not a fix: `Settings()` reads `.env`
+        # relative to process cwd (pydantic-settings never touches
+        # os.environ), so if discover_site is invoked from anywhere other
+        # than the repo root, the MCP stdio subprocess's own `Settings()`
+        # would still fail to find `.env`. Anchor to `_REPO_ROOT` (derived
+        # from this module's own file location, not the caller's cwd) so
+        # the subprocess resolves `.env` the same way regardless of where
+        # discover_site was invoked from.
+        cwd=str(_REPO_ROOT),
         # pydantic-settings parses `.env` into the model without mutating
         # os.environ, so the key must be forwarded explicitly or the CLI
         # subprocess (which does its own auth) never sees it.

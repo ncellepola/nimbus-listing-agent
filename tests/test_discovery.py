@@ -100,6 +100,24 @@ async def test_discover_site_requires_api_key():
         await discover_site("ashworthholme.co.uk", settings=settings)
 
 
+def test_mcp_server_options_anchors_cwd_to_repo_root(monkeypatch, tmp_path):
+    # cwd=None (the default) just inherits the caller's cwd, which is a
+    # no-op, not a fix, for a caller invoked from outside the repo root:
+    # the MCP stdio subprocess's own Settings() would then fail to find
+    # .env. Changing into a throwaway directory before building the
+    # options proves the resolved cwd is anchored to the repo root (derived
+    # from this module's own file location), not inherited from here.
+    monkeypatch.chdir(tmp_path)
+
+    options = discovery._mcp_server_options(
+        Settings(anthropic_api_key="sk-ant-test-not-real"), 20, "sk-ant-test-not-real"
+    )
+
+    assert options.cwd == str(discovery._REPO_ROOT)
+    assert options.cwd != str(tmp_path)
+    assert (Path(options.cwd) / "pyproject.toml").is_file()
+
+
 def _settings_with_key(tmp_path) -> Settings:
     return Settings(
         anthropic_api_key="sk-ant-test-not-real",
