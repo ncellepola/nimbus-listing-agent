@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     sitemap_urls TEXT NOT NULL,
     listing_index_urls TEXT NOT NULL,
     listing_url_patterns TEXT NOT NULL,
+    sample_listing_urls TEXT NOT NULL,
     pagination TEXT,
     field_hints TEXT NOT NULL,
     render_required INTEGER NOT NULL,
@@ -112,6 +113,7 @@ def _recipe_to_row(recipe: SiteRecipe, version: int) -> dict:
         "sitemap_urls": json.dumps(recipe.sitemap_urls),
         "listing_index_urls": json.dumps(recipe.listing_index_urls),
         "listing_url_patterns": json.dumps(recipe.listing_url_patterns),
+        "sample_listing_urls": json.dumps(recipe.sample_listing_urls),
         "pagination": (
             json.dumps(recipe.pagination.model_dump()) if recipe.pagination is not None else None
         ),
@@ -131,6 +133,7 @@ def _row_to_recipe(row: sqlite3.Row) -> SiteRecipe:
         sitemap_urls=json.loads(row["sitemap_urls"]),
         listing_index_urls=json.loads(row["listing_index_urls"]),
         listing_url_patterns=json.loads(row["listing_url_patterns"]),
+        sample_listing_urls=json.loads(row["sample_listing_urls"]),
         pagination=PaginationRule(**json.loads(pagination_raw)) if pagination_raw else None,
         field_hints=[FieldHint(**h) for h in json.loads(row["field_hints"])],
         render_required=bool(row["render_required"]),
@@ -155,12 +158,12 @@ def save_recipe(conn: sqlite3.Connection, recipe: SiteRecipe) -> int:
         """
         INSERT INTO recipes (
             domain, version, discovered_at, sitemap_urls, listing_index_urls,
-            listing_url_patterns, pagination, field_hints, render_required,
-            confidence, notes
+            listing_url_patterns, sample_listing_urls, pagination, field_hints,
+            render_required, confidence, notes
         ) VALUES (
             :domain, :version, :discovered_at, :sitemap_urls, :listing_index_urls,
-            :listing_url_patterns, :pagination, :field_hints, :render_required,
-            :confidence, :notes
+            :listing_url_patterns, :sample_listing_urls, :pagination, :field_hints,
+            :render_required, :confidence, :notes
         )
         """,
         row,

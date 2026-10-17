@@ -51,6 +51,7 @@ def make_recipe(**overrides) -> SiteRecipe:
         "sitemap_urls": ["https://www.ashworthholme.co.uk/sitemap.xml"],
         "listing_index_urls": [],
         "listing_url_patterns": ["/property/*"],
+        "sample_listing_urls": ["https://www.ashworthholme.co.uk/property/123"],
         "pagination": None,
         "field_hints": [],
         "render_required": False,

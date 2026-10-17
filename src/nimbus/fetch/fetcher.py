@@ -24,6 +24,26 @@ class RobotsDisallowed(Exception):
         super().__init__(f"robots.txt disallows fetching {url}")
 
 
+class FetchError(Exception):
+    """Raised when the configured backend fails to fetch `url` for a
+    transport-level reason -- a timeout, a connection error, too many
+    redirects, a backend-specific proxy failure, and so on.
+
+    `Fetcher.get()` raises this uniformly regardless of which `FetchBackend`
+    is configured (`HttpxBackend` raises `httpx.HTTPError` subclasses;
+    `CrawlbaseBackend` would raise whatever its own HTTP client raises for
+    the same underlying problem). A caller that wants to tolerate a single
+    bad URL without caring which backend is in use -- the nightly crawler,
+    which must not let one flaky listing page abort an entire site's run --
+    catches `FetchError` and nothing more backend-specific than that.
+    """
+
+    def __init__(self, url: str, cause: BaseException) -> None:
+        self.url = url
+        self.cause = cause
+        super().__init__(f"failed to fetch {url}: {cause}")
+
+
 class Fetcher:
     def __init__(self, settings: Settings, cache: HtmlCache, backend: FetchBackend) -> None:
         self.settings = settings
@@ -76,5 +96,8 @@ class Fetcher:
         if not allow_network:
             raise RuntimeError(f"no cached page for {url} and network access is disabled")
 
-        response = await self.backend.fetch(url, timeout=self.settings.request_timeout)
+        try:
+            response = await self.backend.fetch(url, timeout=self.settings.request_timeout)
+        except Exception as exc:
+            raise FetchError(url, exc) from exc
         return self.cache.put(url, response.status, response.content_type, response.body)

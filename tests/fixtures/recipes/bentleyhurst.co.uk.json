@@ -1,0 +1,60 @@
+{
+  "domain": "bentleyhurst.co.uk",
+  "version": 1,
+  "discovered_at": "2026-10-17T08:35:17.999318Z",
+  "sitemap_urls": [
+    "https://www.bentleyhurst.co.uk/sitemap.xml",
+    "https://www.bentleyhurst.co.uk/properties.xml"
+  ],
+  "listing_index_urls": [
+    "https://www.bentleyhurst.co.uk/property/for-sale/in-manchester/",
+    "https://www.bentleyhurst.co.uk/property/for-sale/in-hale/"
+  ],
+  "listing_url_patterns": [
+    "/property-for-sale/*"
+  ],
+  "sample_listing_urls": [
+    "https://www.bentleyhurst.co.uk/property-for-sale/1-bedroom-apartment-for-sale-in-parkers-apartments-115-corporation-street-manchester-m4-64f9f254acdb1e1f1a23f309/",
+    "https://www.bentleyhurst.co.uk/property-for-sale/2-bedroom-apartment-for-sale-in-icon-building-64-shudehill-manchester-m4-634bc6e466fd2afa7b247e44/"
+  ],
+  "pagination": {
+    "kind": "none",
+    "param": null,
+    "max_pages": 1
+  },
+  "field_hints": [
+    {
+      "field": "address",
+      "css_selector": null,
+      "notes": "Not in the HTML the fetcher returns; loaded by JavaScript. The URL slug holds a rough address and postcode district (e.g. 'parkers-apartments-115-corporation-street-manchester-m4') before a trailing 24-character hex ID."
+    },
+    {
+      "field": "bedrooms",
+      "css_selector": null,
+      "notes": "Not in the fetched HTML. The slug usually starts with '<N>-bedroom-', but a few slugs leave it out (e.g. 'apartment-to-rent-in-...')."
+    },
+    {
+      "field": "property_type",
+      "css_selector": null,
+      "notes": "In the slug after the bedroom count (apartment, ground-floor-flat, semi-detached-house, terraced-house, town-house, maisonette, penthouse). Rendered page not seen."
+    },
+    {
+      "field": "price",
+      "css_selector": null,
+      "notes": "Not seen. Loaded by JavaScript; needs a rendering browser."
+    },
+    {
+      "field": "description",
+      "css_selector": null,
+      "notes": "Not seen. Loaded by JavaScript."
+    },
+    {
+      "field": "agent_name",
+      "css_selector": null,
+      "notes": "Bentley Hurst (Manchester and Hale branches). The detail page's 'Call Us' link is tel:01615430310."
+    }
+  ],
+  "render_required": true,
+  "confidence": 0.3,
+  "notes": "Gatsby site. robots.txt allows crawling (crawl_delay 1s, only /email/ and two odd /in-undefined/ paths disallowed, ai_training_allowed true, no AI-specific rules). The main sitemap at /sitemap.xml lists sitemap-pages.xml, news.xml, areaguide.xml, teams.xml, properties.xml and search.xml. properties.xml holds both /property-for-sale/<slug>-<24-hex-id>/ and /property-to-rent/<slug>-<id>/ URLs; only the for-sale ones are wanted. get_sitemap output was too large to read here (about 208,000 characters), so only about the first 40,000 characters of properties.xml were reviewed. Quirks: (1) some /property-for-sale/ slugs say 'to-rent' (e.g. ...-to-rent-in-the-bridge-40-dearmans-place-salford-m3-62728a67e181b014bdea687e/), so the crawler must check each listing's type on the rendered page and not trust the path alone. (2) Every sitemap entry has the same lastmod (the build time), and IDs date back to 2021, so the sitemap probably includes sold or withdrawn listings; check status (Sold/SSTC) on the rendered page. (3) Detail and search pages return 200, but the fetched HTML has only navigation, a 'Book a viewing' button and a 'Call Us' link. Address, price, bedrooms and description load in the browser, and the Gatsby page-data.json path returned 404, so the crawler needs a headless browser. (4) The search pages /property/for-sale/in-manchester/ and /in-hale/ show no results without JavaScript, and their pagination could not be seen; use properties.xml as the list of URLs to crawl. (5) Two other sale URLs (lightbox-media-city ...64075e545fb6e5674e7f78fb, oxygen-tower ...62792ff4e181b014bdea68b9) errored on fetch. HONEST CAVEAT: the two sample URLs were opened and are property-detail pages whose slugs say 'for sale', but price, address and bedrooms could not be seen without JavaScript. They are NOT fully confirmed as live residential sale listings. A human should render one in a browser before trusting this recipe."
+}

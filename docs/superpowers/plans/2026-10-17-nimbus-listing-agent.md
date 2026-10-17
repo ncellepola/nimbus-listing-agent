@@ -333,7 +333,10 @@ Branch `feat/recipe-crawler`, PR #4.
   - `models.CrawlRecord`: `url: str`, `html: str`, `from_cache: bool`, `fetched_at: datetime`, `content_hash: str`
   - `def select_listing_urls(urls: list[str], recipe: SiteRecipe) -> list[str]` — pure; filters by `listing_url_patterns`, de-duplicates, preserves order
   - `async def collect_candidate_urls(recipe: SiteRecipe, *, fetcher: Fetcher) -> list[str]` — sitemaps first, listing index + pagination as fallback
-  - `async def crawl_site(recipe: SiteRecipe, *, fetcher: Fetcher, crawl_delay: float, limit: int | None = None, sleep=asyncio.sleep) -> list[CrawlRecord]`
+  - `models.CrawlOutcome`: `domain: str`, `records: list[CrawlRecord]`, `candidates: int`, `selected: int`, `fetched: int`, `skipped_robots: int`, `skipped_errors: int`
+  - `async def crawl_site(recipe: SiteRecipe, *, fetcher: Fetcher, crawl_delay: float, limit: int | None = None, sleep=asyncio.sleep) -> CrawlOutcome`
+
+Returns counts, not a bare list (ruling R29). `crawl_site` collects candidates internally, so a caller that only receives records cannot populate `storage.crawl_runs` truthfully without re-running collection and re-fetching every sitemap. Also produces one summary log line per run, at ERROR when candidates existed but zero records came back.
 
 Crawl delay is passed in explicitly, resolved by the caller from `await fetcher.robots_for(domain)`. It is live site policy and must not be frozen into a recipe that may be weeks stale (pre-flight ruling R5).
 
@@ -429,11 +432,22 @@ async def test_extract_listing_rejects_malformed_model_output():
     assert result.listing is None and result.needs_review is True
     assert result.issues
 
-async def test_extract_listing_rejects_hallucinated_price_absent_from_page():
-    # page contains £450,000; model returns £999,999
-    result = await extract_listing(record, recipe, client=StubClient(price=999_999))
+async def test_extract_listing_rejects_price_not_corroborated_by_field_hint():
+    # The real ashworthholme fixtures carry 48 distinct pound values from a
+    # price-filter dropdown, £350 to £10,000,000, against a true price of
+    # £650,000. A mere "does this value appear in the page" check passes a
+    # wrong answer, so the price must be corroborated at the recipe's field
+    # hint location (or the status-bearing heading), not merely be present.
+    result = await extract_listing(record, recipe, client=StubClient(price=10_000_000))
     assert result.needs_review is True
-    assert any("not found in page" in i for i in result.issues)
+    assert any("not corroborated" in i for i in result.issues)
+
+async def test_extract_listing_on_a_page_with_no_extractable_fields():
+    # bentleyhurst fixtures are client-rendered Gatsby shells with no price,
+    # address or description in the HTML at all (ruling R27).
+    result = await extract_listing(empty_shell_record, recipe, client=client)
+    assert result.listing is None
+    assert result.needs_review is True and result.issues
 
 async def test_extract_listing_happy_path_sets_confidence_and_hash():
     result = await extract_listing(record, recipe, client=StubClient(valid_payload))

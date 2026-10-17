@@ -78,11 +78,50 @@ class SiteRecipe(BaseModel):
     sitemap_urls: list[str] = Field(default_factory=list)
     listing_index_urls: list[str] = Field(default_factory=list)
     listing_url_patterns: list[str] = Field(default_factory=list)
+    # URLs of individual listing pages the discovery agent actually opened
+    # and confirmed were residential sales listings -- the evidence behind
+    # listing_url_patterns, and what validate_recipe checks the pattern
+    # against (not sitemap_urls/listing_index_urls, which are index pages,
+    # not listings).
+    sample_listing_urls: list[str] = Field(default_factory=list)
     pagination: PaginationRule | None = None
     field_hints: list[FieldHint] = Field(default_factory=list)
     render_required: bool = False
     confidence: float = Field(ge=0.0, le=1.0)
     notes: str = ""
+
+
+class CrawlRecord(BaseModel):
+    """One page fetched by the deterministic crawler (Task 4), before any
+    extraction happens. `content_hash` lets Task 5's delta detection decide
+    whether a previously-seen page changed without re-extracting it."""
+
+    url: str
+    html: str
+    from_cache: bool
+    fetched_at: datetime
+    content_hash: str
+
+
+class CrawlOutcome(BaseModel):
+    """The full result of one `crawl_site` run against one domain.
+
+    `records` is what Task 5 extracts from. The five counts exist so an
+    orchestration layer can write a truthful `crawl_runs` row (Task 7)
+    without re-deriving them by re-crawling: `crawl_site` already knows
+    exactly how many candidate URLs it found, how many matched the
+    recipe's listing_url_patterns, how many were actually fetched, and how
+    many were skipped for each of the two tolerated reasons (robots.txt,
+    or a transport-level FetchError) -- recovering that from `records`
+    alone is impossible once the skipped URLs have been discarded."""
+
+    domain: str
+    records: list[CrawlRecord]
+    candidates: int
+    selected: int
+    fetched: int
+    skipped_robots: int
+    skipped_errors: int
 
 
 class ExtractionResult(BaseModel):

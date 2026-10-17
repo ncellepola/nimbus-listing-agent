@@ -8,7 +8,15 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "httpx>=0.27",
+    "mcp>=2,<3",
+    "markdownify>=0.13",
+    "beautifulsoup4>=4.12",
+    "claude-agent-sdk>=0.2.168",
+    "anthropic>=1.15.0",
 ]
+
+[project.scripts]
+nimbus-mcp = "nimbus.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [

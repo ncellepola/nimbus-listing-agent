@@ -1,0 +1,26 @@
+{
+  "domain": "ashworthholme.co.uk",
+  "version": 1,
+  "discovered_at": "2026-01-01T00:00:00+00:00",
+  "sitemap_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34612724/-/sale/alcester-road",
+    "https://www.ashworthholme.co.uk/property-details/34612800/-/sale/mill-lane",
+    "https://www.ashworthholme.co.uk/about-us",
+    "https://www.ashworthholme.co.uk/contact"
+  ],
+  "listing_index_urls": [],
+  "listing_url_patterns": ["/property-details/*"],
+  "sample_listing_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34612724/-/sale/alcester-road",
+    "https://www.ashworthholme.co.uk/property-details/34612800/-/sale/mill-lane"
+  ],
+  "pagination": {"kind": "none", "param": null, "max_pages": 1},
+  "field_hints": [
+    {"field": "price", "css_selector": ".property-price", "notes": null},
+    {"field": "address", "css_selector": "h1.property-title", "notes": null},
+    {"field": "bedrooms", "css_selector": null, "notes": "look for a bed icon with a number next to it"}
+  ],
+  "render_required": false,
+  "confidence": 0.9,
+  "notes": "Flat sitemap with direct listing URLs; no pagination needed."
+}
