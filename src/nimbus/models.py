@@ -91,6 +91,18 @@ class SiteRecipe(BaseModel):
     notes: str = ""
 
 
+class CrawlRecord(BaseModel):
+    """One page fetched by the deterministic crawler (Task 4), before any
+    extraction happens. `content_hash` lets Task 5's delta detection decide
+    whether a previously-seen page changed without re-extracting it."""
+
+    url: str
+    html: str
+    from_cache: bool
+    fetched_at: datetime
+    content_hash: str
+
+
 class ExtractionResult(BaseModel):
     listing: Listing | None = None
     field_confidence: dict[str, float] = Field(default_factory=dict)
