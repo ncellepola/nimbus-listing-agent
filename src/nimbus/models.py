@@ -174,6 +174,15 @@ class RejectionReason(StrEnum):
     NO_CORROBORATION_REGION = "no_corroboration_region"
     NO_TOOL_OUTPUT = "no_tool_output"
     SCHEMA_INVALID = "schema_invalid"
+    # The model call itself failed (timeout, 429, 5xx, revoked key).
+    # Never written to `extraction_audit`: it says nothing about whether
+    # the recipe still matches the site, and letting an API outage trip
+    # `needs_heal` would answer an infrastructure problem by paying for a
+    # discovery agent run. It is reported to
+    # `delta.should_allow_mass_withdrawal`, which asks a different
+    # question -- "did extraction work tonight?" -- to which it is a
+    # decisive no.
+    EXTRACTION_ERROR = "extraction_error"
 
 
 # Rejections that are correct outcomes rather than evidence of drift.

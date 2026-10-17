@@ -11,8 +11,9 @@ unseen site **once**, producing a small, versioned, auditable data artifact
 (a `SiteRecipe`); deterministic code executes that recipe every night with
 **no LLM anywhere in crawling, URL selection, pagination, delta detection
 or health monitoring, and one model call per listing page whose bytes
-actually changed** (`content_hash` is compared against the stored listing
-first, so an unchanged page costs nothing; a Sold-STC or To-Let status
+actually changed, or which has no stored listing yet** (`content_hash` is
+compared against the stored listing first, so an unchanged page costs
+nothing, while a page never successfully extracted before is retried; a Sold-STC or To-Let status
 heading is rejected by a deterministic pre-filter before any call, which
 on this repo's own cached pages is two thirds of one site's traffic); a
 health monitor watches extraction quality and sends the agent back in only
@@ -38,9 +39,12 @@ whether a site has broken is plain Python reading a stored recipe.
        │  read nightly, no LLM, no MCP (ADR-0003)
        ▼
    crawler.py ──CrawlRecord──▶ extractor.py ──Listing──▶ delta.py
-   (crawl_site)   (1 LLM call/page    (extract_listing,     (apply_delta: new/
-                   + deterministic     record_extraction)    price_changed/
-                   price/sale guards)                         withdrawn/unchanged)
+   (crawl_site)   (1 LLM call per      (extract_listing,     (apply_delta: new/
+                   *changed* page,      record_extraction)    price_changed/
+                   0 for unchanged                            withdrawn/unchanged)
+                   or Sold/To-Let;
+                   + deterministic
+                   price/sale guards)
        │                            │
        └────────── extraction_audit rows ──────────────▶  heal.py
                                                             (site_health, needs_heal,
@@ -198,8 +202,9 @@ src/nimbus/
   mcp_server.py     The discovery agent's only route to the web (3 tools, stdio MCP)
   discovery.py      The LLM agent that learns a site once -> SiteRecipe
   crawler.py        The deterministic nightly crawl -- zero LLM dependency
-  extractor.py      One LLM call per page + deterministic price/sale guards + audit trail
-  heal.py           site_health / needs_heal / heal_site
+  extractor.py      One LLM call per *changed* sale page (0 for unchanged or Sold/To-Let)
+                    + deterministic price/sale guards + audit trail
+  heal.py           site_health / needs_heal / needs_attention / heal_site
   delta.py          apply_delta, should_allow_mass_withdrawal: new / price_changed / withdrawn / unchanged
   cli.py            onboard / crawl / heal / report / demo (thin -- demo delegates to demo.py)
   demo.py           the demo harness: fixtures, stub classes, run_offline_demo / run_live_demo

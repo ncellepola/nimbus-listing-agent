@@ -118,6 +118,27 @@ def needs_heal(health: SiteHealth, *, threshold: float = DEFAULT_HEAL_THRESHOLD)
     return health.schema_valid_rate < threshold
 
 
+def needs_attention(health: SiteHealth) -> bool:
+    """Whether `health` is a shape a human should look at, short of
+    sending the discovery agent back in.
+
+    One shape, and it is the blind spot `needs_heal` acquired when
+    deliberate exclusions left its denominator: a domain that produced
+    audit rows of which *every single one* was a correct non-sale
+    exclusion. `sample_size == 0`, so `needs_heal` reads "no evidence"
+    and reports healthy.
+
+    That is right when a small agent's stock has genuinely all gone under
+    offer, and it is also exactly what a bug in the non-sale pre-filter
+    looks like -- a site-wide "To Let" navigation item mislabelling every
+    page, costing nothing in model spend and raising no alarm anywhere.
+    Not `needs_heal`, because re-running discovery against a site whose
+    recipe is working is the wrong and expensive answer to both
+    possibilities. But not silence either.
+    """
+    return health.sample_size == 0 and health.deliberate_exclusions > 0
+
+
 def _field_hint_map(recipe: SiteRecipe) -> dict[str, str | None]:
     return {hint.field: hint.css_selector for hint in recipe.field_hints}
 

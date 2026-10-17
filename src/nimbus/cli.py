@@ -45,7 +45,7 @@ from nimbus.fetch.backends import build_backend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.heal import heal_site, site_health
-from nimbus.models import ExtractionResult, Listing
+from nimbus.models import ExtractionResult, Listing, RejectionReason
 
 app = typer.Typer(
     name="nimbus",
@@ -197,6 +197,21 @@ def crawl(
             result = asyncio.run(extract_listing(record, recipe, client=client))
         except ExtractionError as exc:
             typer.echo(f"  extraction failed for {record.url}: {exc}")
+            # Reported, not dropped. A swallowed failure used to vanish
+            # from `results` entirely, which shrank the mass-withdrawal
+            # guard's denominator along with its numerator -- 99 failures
+            # out of 100 pages scored a perfect 1/1. No audit row: an API
+            # outage says nothing about whether the recipe still matches
+            # the site, and must not trip `needs_heal`.
+            results.append(
+                ExtractionResult(
+                    listing=None,
+                    overall_confidence=0.0,
+                    needs_review=True,
+                    issues=[f"extraction call failed: {exc}"],
+                    rejection_reason=RejectionReason.EXTRACTION_ERROR,
+                )
+            )
             continue
         results.append(result)
         # NOTE: extract_listing does not surface the raw response's token
@@ -256,7 +271,10 @@ def heal(ctx: typer.Context, domain: str) -> None:
     conn = _conn(ctx)
 
     health = site_health(conn, domain)
-    if health.sample_size:
+    # Not `sample_size` alone: a domain whose every page was a non-sale
+    # exclusion has a sample size of zero and is precisely the state
+    # `needs_attention` exists to surface.
+    if health.sample_size or health.deliberate_exclusions:
         console.print_health(f"{domain} health before heal", health)
 
     typer.echo(f"Healing {domain} via the discovery agent (this calls the live Anthropic API)...")
@@ -297,7 +315,7 @@ def report(
             typer.echo("no recipe saved")
 
         health = site_health(conn, d)
-        if health.sample_size:
+        if health.sample_size or health.deliberate_exclusions:
             console.print_health("health", health)
 
         listings = storage.list_listings(conn, d)

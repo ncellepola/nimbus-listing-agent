@@ -97,10 +97,11 @@ def should_allow_mass_withdrawal(
 
     Four ways to fail, each a distinct real shape:
 
-    - an explicit `--limit` was applied. A limited run deliberately looks
-      at a slice of the site; the URLs it never opened are not absent,
-      they are unexamined. Disqualifying in its own right, because a
-      `--limit` equal to the selected set would otherwise clear the ratio.
+    - a `--limit` actually truncated the selected set (`limit_applied`).
+      Such a run deliberately looks at a slice of the site; the URLs it
+      never opened are not absent, they are unexamined. A limit that did
+      not bite -- `--limit 50` against a one-listing site -- leaves
+      `limit_applied` False and is treated as the complete run it is.
     - nothing was selected at all (`outcome.selected == 0`): no candidate
       matched the recipe's patterns, which is recipe drift, not a quiet
       night.
@@ -118,22 +119,27 @@ def should_allow_mass_withdrawal(
     if outcome.fetched < outcome.selected * min_fetch_ratio:
         return False
 
-    if outcome.fetched > 0 and not results:
-        # Pages were fetched but extraction produced nothing at all --
-        # every call raised, or the step never ran. An empty `listings`
-        # list caused by "extraction did not happen" must never be read
-        # as "nothing is live any more".
+    # The denominator is `outcome.fetched`, not `len(results)`, and that
+    # distinction is the whole guard. A result the caller never handed
+    # over -- an `ExtractionError` it caught and `continue`d past, which
+    # is what an Anthropic 429 storm or a revoked key produces by the
+    # hundred -- must shrink the numerator and leave the denominator
+    # alone. Counting only what came back meant 99 failures out of 100
+    # pages left a single success over a denominator of one: a perfect
+    # score, authorising the withdrawal of the entire domain. Deriving
+    # the denominator from the crawl instead makes the guard independent
+    # of whether the caller remembered to report its failures.
+    deliberate = sum(1 for r in results if r.rejection_reason in DELIBERATE_EXCLUSIONS)
+    judgeable = max(outcome.fetched - deliberate, 0)
+    if judgeable == 0:
+        # Either nothing was fetched, or everything fetched was a correct
+        # non-sale exclusion. The latter says the recipe is fine, but it
+        # is no evidence about the stored listings either, so neither
+        # authorises removing them.
         return False
 
-    judgeable = [r for r in results if r.rejection_reason not in DELIBERATE_EXCLUSIONS]
-    if not judgeable:
-        # Everything this run saw was a correct non-sale exclusion. That
-        # says the recipe is fine, but it is no evidence about the stored
-        # listings either, so it does not authorise removing them.
-        return False
-
-    extracted = sum(1 for r in judgeable if r.listing is not None)
-    return extracted >= len(judgeable) * min_extraction_ratio
+    extracted = sum(1 for r in results if r.listing is not None)
+    return extracted >= judgeable * min_extraction_ratio
 
 
 def apply_delta(

@@ -149,14 +149,23 @@ _RENTAL_MARKERS = ("pcm", "per calendar month", "per month", "/pm", "pw")
 _LETTING_STATUS_MARKERS = ("to let", "let agreed", "to rent")
 _SOLD_MARKERS = ("sold stc", "sold subject to contract", "sold")
 
-# Markers the *pre-model* filter acts on. A strict subset of the three
-# tuples above, by design: this filter is an optimisation, never a new
-# policy. It may only skip a model call that `is_residential_sale` would
-# certainly have rejected afterwards, so it carries the unambiguous
-# multi-word status phrases and deliberately omits `_SOLD_MARKERS`' bare
-# "sold" (a "Recently Sold Nearby" nav heading must not cost a live
-# listing) and `_RENTAL_MARKERS`' two-character "pw"/"/pm", which are too
-# short to match safely against a whole corroboration region.
+# Markers the *pre-model* filter acts on: a strict subset of the three
+# tuples above, carrying the unambiguous multi-word status phrases and
+# deliberately omitting `_SOLD_MARKERS`' bare "sold" and
+# `_RENTAL_MARKERS`' two-character "pw"/"/pm", which are too short to
+# match safely against anything wider than one short string.
+#
+# A subset of the *markers* is not the same as a subset of the *rule*, and
+# an earlier version of this comment claimed otherwise. `is_residential_sale`
+# runs against the model's narrow `price_raw`; this filter runs against a
+# region of the page, so a matching marker anywhere in that region decides
+# the page. That is only sound if the region is one the recipe itself says
+# carries this listing's price and status -- hence `_status_text` below,
+# not `_corroboration_text`. Scanning every heading (which this did, and
+# which the three cached fixture sites happened not to punish) means a UK
+# agent with a lettings arm and "To Let" in its global navigation has its
+# entire inventory rejected, for free and without a model call to notice
+# it by.
 _UNAMBIGUOUS_NON_SALE_MARKERS = (
     "sold stc",
     "sold subject to contract",
@@ -272,12 +281,18 @@ def non_sale_marker(status_text: str) -> str | None:
     """The first unambiguous non-sale status marker in `status_text`, or
     `None`. Pure, no LLM, and cheap enough to run before the model call.
 
-    Measured on this repo's own cached pages: 12 of ashworthholme.co.uk's
-    18 listing pages (11 Sold STC, 1 To Let) carry one of these markers in
-    the status heading the corroboration region already contains, with no
-    false positive on any of the 6 live For Sale pages. That is two thirds
-    of that site's extraction spend, previously paid to have the model
-    tell us something the heading already said.
+    `status_text` must be a region the *recipe* says carries this
+    listing's own price and status (`_status_text`), never the whole page
+    and never every heading on it: a marker anywhere in the region
+    rejects the page, so a "Properties To Let" item in a site-wide
+    navigation would otherwise reject that site's entire inventory.
+
+    Measured on this repo's own cached pages, against the narrow region:
+    12 of ashworthholme.co.uk's 18 listing pages (11 Sold STC, 1 To Let)
+    carry one of these markers, with no false positive on any of the 6
+    live For Sale pages -- two thirds of that site's extraction spend,
+    previously paid to have the model tell us what the status line
+    already said.
     """
     lowered = status_text.lower()
     for marker in _UNAMBIGUOUS_NON_SALE_MARKERS:
@@ -335,6 +350,41 @@ def _corroboration_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
     # `<div class="price">`. The length cap excludes a WordPress-style
     # body/container class that also contains the substring "price"
     # (e.g. "price_qualifier-guide-price") but wraps the whole page.
+    for element in cleaned.select(_PRICE_WIDGET_SELECTOR):
+        text = element.get_text(" ", strip=True)
+        if text and len(text) <= _MAX_PRICE_WIDGET_CHARS:
+            parts.append(text)
+
+    return "\n".join(part for part in parts if part)
+
+
+def _status_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
+    """The narrow region the *pre-model* non-sale filter is allowed to
+    judge: the recipe's own price field-hint match, plus any element that
+    names itself a price widget by class/id. No general heading scan.
+
+    Deliberately narrower than `_corroboration_text`, which may be wide
+    because it only ever *corroborates* a value the model already
+    produced -- a false match there costs nothing. A false match here
+    rejects a live listing outright and never calls the model, so this
+    region is restricted to the places the recipe asserts this listing's
+    own price and status live. A page offering no such place simply does
+    not get pre-filtered, and goes to the model as before.
+    """
+    cleaned = BeautifulSoup(str(soup), "html.parser")
+    for tag in cleaned(_FORM_CONTROL_TAGS):
+        tag.decompose()
+
+    parts: list[str] = []
+
+    price_hint = next((h for h in recipe.field_hints if h.field == "price"), None)
+    if price_hint is not None and price_hint.css_selector:
+        try:
+            matched = cleaned.select(price_hint.css_selector)
+        except Exception:
+            matched = []
+        parts.extend(el.get_text(" ", strip=True) for el in matched)
+
     for element in cleaned.select(_PRICE_WIDGET_SELECTOR):
         text = element.get_text(" ", strip=True)
         if text and len(text) <= _MAX_PRICE_WIDGET_CHARS:
@@ -480,7 +530,7 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
     corroboration_text = _corroboration_text(soup, recipe)
 
     if not corroboration_text.strip():
-        # Ruling R27: nothing on this page (no field-hint match, no
+        # Nothing on this page (no field-hint match, no
         # heading at all) to corroborate anything against. Reject before
         # spending a model call that could never be validated either way —
         # bentleyhurst.co.uk's real fixtures are exactly this: a
@@ -497,7 +547,7 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
     # heading is already in `corroboration_text`; if it says Sold STC or
     # To Let, `is_residential_sale` is going to reject this page in a
     # moment anyway, so there is nothing to buy by asking the model first.
-    marker = non_sale_marker(corroboration_text)
+    marker = non_sale_marker(_status_text(soup, recipe))
     if marker is not None:
         return _empty_result(
             f"page is not an open residential sale listing: its status text carries "

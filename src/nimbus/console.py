@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import typer
 
-from nimbus.heal import needs_heal
+from nimbus.heal import needs_attention, needs_heal
 from nimbus.models import DeltaReport, SiteHealth
 
 
@@ -52,3 +52,10 @@ def print_health(label: str, health: SiteHealth) -> None:
         f"(sample={health.sample_size}{excluded}) "
         f"-> needs_heal={needs_heal(health)}"
     )
+    if needs_attention(health):
+        typer.echo(
+            f"{label}: ATTENTION -- every one of this domain's "
+            f"{health.deliberate_exclusions} audit row(s) was a non-sale exclusion, so "
+            "there is nothing left to judge extraction health on. Either its stock has "
+            "genuinely all gone, or the non-sale filter is rejecting live listings."
+        )

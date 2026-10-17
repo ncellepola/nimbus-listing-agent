@@ -199,18 +199,18 @@ def test_should_allow_mass_withdrawal_refuses_a_limited_run():
     assert should_allow_mass_withdrawal(limited, _extracted(5)) is False
 
 
-def test_should_allow_mass_withdrawal_refuses_a_limit_that_covered_everything():
-    """Carrying the untruncated count fixes the ratio, but a limit equal to
-    (or above) the selected set still clears it. An ad-hoc, operator-driven
-    partial run is never the thing that should wipe a dataset, however much
-    of the site it happened to cover, so an applied limit is disqualifying
-    in its own right."""
+def test_a_limit_that_did_not_truncate_anything_is_not_disqualifying():
+    """`crawl_site` sets `limit_applied` only when the limit actually bit,
+    so `--limit 50` against a one-listing site is the complete run it
+    looks like. The guard must not treat the mere presence of a `--limit`
+    flag as disqualifying -- an earlier version of this test asserted on
+    a `limit_applied=True, attempted == selected` outcome that
+    `crawl_site` cannot produce."""
     assert (
         should_allow_mass_withdrawal(
-            _outcome(selected=195, fetched=195, attempted=195, limit_applied=True),
-            _extracted(195),
+            _outcome(selected=1, fetched=1, attempted=1, limit_applied=False), _extracted(1)
         )
-        is False
+        is True
     )
 
 
@@ -395,3 +395,37 @@ def test_the_guard_does_not_latch_shut_once_half_a_domain_has_been_withdrawn(tmp
 
     assert report.withdrawal_suppressed is False
     assert report.withdrawn == [urls[3]]
+
+
+# --------------------------------------------------------------------------
+# B1: a dropped result must shrink the numerator, never the denominator.
+# `cli.crawl` caught ExtractionError and `continue`d without appending, so
+# an Anthropic 429/5xx storm or a revoked key made the guard's denominator
+# collapse along with its numerator -- 99 of 100 calls raising left one
+# success over a denominator of one, a perfect score, authorising the
+# withdrawal of the whole domain. The same shape the fix was about, one
+# layer up, and reachable by likelier means than a markup redesign.
+# --------------------------------------------------------------------------
+
+
+def test_results_dropped_by_the_caller_do_not_shrink_the_denominator():
+    outcome = _outcome(selected=100, fetched=100)
+
+    # What a caller that swallowed 99 ExtractionErrors hands over.
+    assert should_allow_mass_withdrawal(outcome, _extracted(1)) is False
+
+
+def test_extraction_errors_reported_as_results_also_refuse():
+    """The other half: a caller that does report them correctly."""
+    outcome = _outcome(selected=100, fetched=100)
+    results = _extracted(1) + _failed(99, RejectionReason.EXTRACTION_ERROR)
+
+    assert should_allow_mass_withdrawal(outcome, results) is False
+
+
+def test_a_handful_of_extraction_errors_does_not_block_a_real_withdrawal():
+    """The denominator is `fetched`, so the threshold stays reachable: 8
+    of 10 pages extracting cleanly is still a trustworthy run."""
+    outcome = _outcome(selected=10, fetched=10)
+
+    assert should_allow_mass_withdrawal(outcome, _extracted(8)) is True

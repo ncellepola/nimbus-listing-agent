@@ -23,6 +23,7 @@ from nimbus.extractor import (
 from nimbus.models import (
     CrawlRecord,
     ExtractionResult,
+    FieldHint,
     PropertyType,
     RejectionReason,
     SiteRecipe,
@@ -440,15 +441,24 @@ _FOR_SALE_PAGE = """
 """
 
 
+# The real ashworthholme.co.uk recipe's price hint, which is what the
+# pre-filter reads. A recipe with no price hint and a page with no price
+# widget offers no region the recipe vouches for, so no pre-filtering
+# happens at all and the page goes to the model as before -- see
+# `_status_text`.
+_PRICE_HINT_RECIPE = make_recipe(field_hints=[FieldHint(field="price", css_selector="h2")])
+
+
 async def test_sold_stc_page_is_rejected_without_a_model_call():
-    """The status heading is already parsed into the corroboration region
-    *before* the model is called, so a Sold-STC page can be rejected for
-    free. On this repo's own 18 cached ashworthholme.co.uk pages, 12 of
-    them (11 Sold STC + 1 To Let) are exactly this shape -- two thirds of
-    the extraction spend for that site, paid to be told "no"."""
+    """The status heading is already parsed out of the page by the
+    recipe's own price hint *before* the model is called, so a Sold-STC
+    page can be rejected for free. On this repo's own 18 cached
+    ashworthholme.co.uk pages, 12 of them (11 Sold STC + 1 To Let) are
+    exactly this shape -- two thirds of the extraction spend for that
+    site, paid to be told "no"."""
     client = _CountingClient()
 
-    result = await extract_listing(_record(_SOLD_PAGE), make_recipe(), client=client)
+    result = await extract_listing(_record(_SOLD_PAGE), _PRICE_HINT_RECIPE, client=client)
 
     assert client.calls == 0
     assert result.listing is None
@@ -458,9 +468,29 @@ async def test_sold_stc_page_is_rejected_without_a_model_call():
 async def test_to_let_page_is_rejected_without_a_model_call():
     client = _CountingClient()
 
-    result = await extract_listing(_record(_TO_LET_PAGE), make_recipe(), client=client)
+    result = await extract_listing(_record(_TO_LET_PAGE), _PRICE_HINT_RECIPE, client=client)
 
     assert client.calls == 0
+    assert result.rejection_reason is RejectionReason.NOT_RESIDENTIAL_SALE
+
+
+async def test_a_page_with_no_recipe_vouched_price_location_is_not_pre_filtered():
+    """The narrowing has a cost worth pinning: a recipe that names no
+    price selector, against a page with no self-identified price widget,
+    offers no region this filter is entitled to judge, so the page goes
+    to the model. Paying for one call beats silently dropping a live
+    listing on the strength of a navigation heading."""
+    result = await extract_listing(
+        _record(_SOLD_PAGE),
+        make_recipe(field_hints=[]),
+        client=StubClient(
+            payload={"address": "Alcester Road, Sale", "price_raw": "Sold Subject to Contract"}
+        ),
+    )
+
+    # Still rejected -- just by the post-model guard, on the model's own
+    # narrow price_raw, which is where the wide-region risk does not exist.
+    assert result.listing is None
     assert result.rejection_reason is RejectionReason.NOT_RESIDENTIAL_SALE
 
 
@@ -512,3 +542,52 @@ async def test_an_uncorroboratable_page_is_labelled_as_a_failure_not_an_exclusio
 
     assert result.listing is None
     assert result.rejection_reason is RejectionReason.NO_CORROBORATION_REGION
+
+
+async def test_a_nav_heading_elsewhere_on_the_page_does_not_pre_reject_a_sale():
+    """B3: the pre-filter matched against every heading on the page, while
+    the post-model check it claimed to be a subset of matches only the
+    model's narrow `price_raw`. A UK agent with a lettings arm has "To
+    Let" or "Let Agreed" in its global navigation on *every* page, so the
+    filter would silently reject that site's entire inventory -- and
+    because these rejections leave site_health's denominator, the monitor
+    would report "no evidence" rather than "collapsed"."""
+    html = """
+    <html><body>
+      <nav><h3>Properties To Let</h3><h3>Let Agreed</h3></nav>
+      <h1>Sherbrooke Close, Sale</h1>
+      <h2>For Sale £850,000</h2>
+    </body></html>
+    """
+    recipe = make_recipe(field_hints=[FieldHint(field="price", css_selector="h2")])
+
+    result = await extract_listing(
+        _record(html),
+        recipe,
+        client=StubClient(
+            payload={"address": "Sherbrooke Close, Sale", "price_raw": "For Sale £850,000"}
+        ),
+    )
+
+    assert result.listing is not None
+    assert result.listing.price_gbp == 850_000
+
+
+async def test_the_pre_filter_still_fires_on_the_recipes_own_price_location():
+    """And the narrowing must not cost the saving it was added for: the
+    status line the recipe's price hint actually points at still rejects
+    before any model call."""
+    html = """
+    <html><body>
+      <nav><h3>Our Branches</h3></nav>
+      <h1>Alcester Road, Sale</h1>
+      <h2>Sold Subject to Contract £985,000</h2>
+    </body></html>
+    """
+    recipe = make_recipe(field_hints=[FieldHint(field="price", css_selector="h2")])
+    client = _CountingClient()
+
+    result = await extract_listing(_record(html), recipe, client=client)
+
+    assert client.calls == 0
+    assert result.rejection_reason is RejectionReason.NOT_RESIDENTIAL_SALE

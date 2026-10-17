@@ -28,6 +28,7 @@ from conftest import make_recipe
 from typer.testing import CliRunner
 
 from nimbus.cli import app
+from nimbus.extractor import ExtractionError
 from nimbus.fetch.backends import CrawlbaseBackend
 from nimbus.models import (
     CrawlOutcome,
@@ -38,7 +39,7 @@ from nimbus.models import (
     RejectionReason,
     Tenure,
 )
-from nimbus.storage import init_db, save_recipe, upsert_listing
+from nimbus.storage import init_db, insert_audit, save_recipe, upsert_listing
 
 runner = CliRunner()
 
@@ -586,3 +587,115 @@ def test_demo_offline_never_falls_back_to_a_default_robots_policy(caplog):
 
     assert result.exit_code == 0, result.output
     assert not [r for r in caplog.records if "robots.txt" in r.getMessage()]
+
+
+def test_crawl_does_not_withdraw_when_most_extraction_calls_raise(tmp_path, monkeypatch):
+    """B1, where it actually lived. `crawl` caught ExtractionError and
+    `continue`d without recording anything, so a swallowed failure left
+    the mass-withdrawal guard's denominator as well as its numerator: 99
+    raised calls and 1 success scored a perfect 1/1 and authorised
+    withdrawing the whole domain. An Anthropic 429 storm or a revoked key
+    produces this by the hundred, and both are likelier than a redesign."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+    urls = [f"https://www.{DOMAIN}/property-details/{n}" for n in range(100)]
+    for n, url in enumerate(urls):
+        upsert_listing(
+            conn,
+            Listing(
+                source_domain=DOMAIN,
+                source_url=url,
+                address=f"{n} Example Street, Sale",
+                price_gbp=100_000 + n,
+                property_type=PropertyType.DETACHED,
+                tenure=Tenure.FREEHOLD,
+                content_hash=f"stored{n}",
+            ),
+        )
+
+    records = [
+        CrawlRecord(
+            url=url,
+            html=f"<html>{n}</html>",
+            from_cache=False,
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+            content_hash=f"fresh{n}",
+        )
+        for n, url in enumerate(urls)
+    ]
+    outcome = CrawlOutcome(
+        domain=DOMAIN,
+        records=records,
+        candidates=100,
+        selected=100,
+        attempted=100,
+        fetched=100,
+        skipped_robots=0,
+        skipped_errors=0,
+    )
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return outcome
+
+    async def flaky_extract(record, recipe, *, client):
+        if record.url == urls[0]:
+            return ExtractionResult(
+                listing=Listing(
+                    source_domain=DOMAIN,
+                    source_url=record.url,
+                    address="0 Example Street, Sale",
+                    price_gbp=100_000,
+                    property_type=PropertyType.DETACHED,
+                    tenure=Tenure.FREEHOLD,
+                    content_hash=record.content_hash,
+                ),
+                overall_confidence=1.0,
+            )
+        raise ExtractionError(record.url, RuntimeError("429 rate_limit_error"))
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+    monkeypatch.setattr("nimbus.cli.extract_listing", flaky_extract)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    assert "withdrawn=0" in result.output
+    assert "withdrawal suppressed" in result.output.lower()
+
+
+def test_report_surfaces_a_domain_whose_every_page_was_excluded(tmp_path):
+    """The all-excluded state has `sample_size == 0`, so guarding the
+    health line on sample size alone printed nothing at all for it --
+    which is the silence the alert exists to break."""
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+    for n in range(5):
+        insert_audit(
+            conn,
+            url=f"https://www.{DOMAIN}/property-details/{n}",
+            model="claude-sonnet-5",
+            prompt_version="v1",
+            recipe_version=1,
+            html_hash=f"h{n}",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            schema_valid=False,
+            needs_review=True,
+            rejection_reason=RejectionReason.NOT_RESIDENTIAL_SALE.value,
+        )
+
+    result = runner.invoke(app, ["--db", str(db), "report", "--domain", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    assert "ATTENTION" in result.output
+    assert "non-sale exclusion" in result.output
