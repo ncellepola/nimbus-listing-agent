@@ -333,7 +333,7 @@ async def test_health_collapses_on_mutated_pages_and_recovers_after_heal(tmp_pat
     # renamed containers the old recipe's field_hints (css_selector "h1"/
     # "h2") no longer reach. The old recipe's own corroboration region is
     # now empty for every one of these pages, so extraction is rejected
-    # before a model is even called (ruling R27) -- schema_valid=False.
+    # before a model is even called -- schema_valid=False.
     for relpath, slug, price in MUTATED_PAGES:
         await _extract_and_record(conn, old_recipe, relpath, slug, price)
 

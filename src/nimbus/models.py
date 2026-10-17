@@ -84,11 +84,17 @@ class SiteRecipe(BaseModel):
     sitemap_urls: list[str] = Field(default_factory=list)
     listing_index_urls: list[str] = Field(default_factory=list)
     listing_url_patterns: list[str] = Field(default_factory=list)
-    # URLs of individual listing pages the discovery agent actually opened
-    # and confirmed were residential sales listings -- the evidence behind
-    # listing_url_patterns, and what validate_recipe checks the pattern
-    # against (not sitemap_urls/listing_index_urls, which are index pages,
-    # not listings).
+    # URLs of individual listing pages the discovery agent *reports* it
+    # opened and confirmed were residential sales listings -- the evidence
+    # behind listing_url_patterns, and what validate_recipe checks the
+    # pattern against (not sitemap_urls/listing_index_urls, which are
+    # index pages, not listings).
+    #
+    # Self-reported, and nothing verifies it: validate_recipe checks the
+    # agent's patterns against the agent's own list, so an agent that
+    # invented both passes. The cache already holds every URL the agent
+    # really fetched, so a genuine check is available and not implemented
+    # -- see the README's "what is not built".
     sample_listing_urls: list[str] = Field(default_factory=list)
     pagination: PaginationRule | None = None
     field_hints: list[FieldHint] = Field(default_factory=list)

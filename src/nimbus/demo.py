@@ -6,7 +6,7 @@ end-to-end runners live here, and `cli.py`'s own `demo` command is two
 lines that call into this module.
 
 `run_offline_demo()` is this project's answer to "a demo that dies in the
-room" (the spec's own named anti-goal, pre-flight ruling R7): it makes *no*
+room" -- the spec's own named anti-goal: it makes *no*
 network call and *no* agent call at all, runs the same five architectural
 beats every other command is built from, and produces byte-identical output
 on every run. It does this by loading a recipe straight from a committed
@@ -252,6 +252,13 @@ async def run_offline_demo() -> None:
         )
 
         typer.echo("\n[2/5] Crawling from the local cache and extracting each page")
+        # Said in the room, not only in source comments -- the same
+        # principle beat 5 already applies to the stubbed re-discovery.
+        # An audience watching two listings come out correctly should not
+        # come away believing they just watched a model read them.
+        typer.echo("      (offline mode: the extraction model is stubbed with the literal")
+        typer.echo("       text these two real pages carry -- the crawl, the deterministic")
+        typer.echo("       price/sale guards and the delta are all the real code)")
         policy = await fetcher.robots_for(recipe.domain)
         outcome = await crawl_site(
             recipe, fetcher=fetcher, crawl_delay=policy.crawl_delay, sleep=_no_sleep
@@ -302,7 +309,7 @@ async def run_offline_demo() -> None:
         # pipeline. Swapping it out at nimbus.heal's own call site -- never
         # calling it, not even once -- is what makes --offline's "no agent
         # call at all" true, while still running heal_site's real
-        # load-previous/save-append-only/diff logic (pre-flight ruling R7).
+        # load-previous/save-append-only/diff logic.
         original_discover_site = heal_module.discover_site
         heal_module.discover_site = _stub_discover_site
         try:

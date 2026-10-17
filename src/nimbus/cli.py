@@ -141,7 +141,7 @@ def crawl(
 
     # Crawl delay is resolved from *live* robots.txt, not the recipe: a
     # recipe can be weeks stale while robots.txt is current policy (see
-    # nimbus.crawler's module docstring and pre-flight ruling R5).
+    # nimbus.crawler's module docstring).
     policy = asyncio.run(fetcher.robots_for(domain))
     outcome = asyncio.run(
         crawl_site(recipe, fetcher=fetcher, crawl_delay=policy.crawl_delay, limit=limit)

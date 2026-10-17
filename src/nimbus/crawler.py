@@ -39,7 +39,7 @@ Three functions:
 Crawl delay is deliberately not read off the recipe: it is live robots.txt
 policy that can change week to week, so the caller resolves it fresh via
 `await fetcher.robots_for(domain)` and passes it in explicitly (pre-flight
-ruling R5). Freezing it into the recipe would let a site's crawl-delay
+explicitly. Freezing it into the recipe would let a site's crawl-delay
 tightening go unnoticed for as long as the recipe goes unrefreshed.
 """
 
@@ -272,7 +272,7 @@ async def crawl_site(
     """Fetch every listing page a recipe implies, with no LLM anywhere in
     the loop. `crawl_delay` is resolved by the caller from live robots.txt
     (`await fetcher.robots_for(domain)`) rather than frozen into the
-    recipe, per pre-flight ruling R5, and is awaited via `sleep` between
+    recipe, and is awaited via `sleep` between
     fetches (not before the first one). A URL robots.txt disallows, or any
     `FetchError` (timeout, too-many-redirects, a flaky listing page -- real
     sites have these; bentleyhurst.co.uk's own recipe notes two sample

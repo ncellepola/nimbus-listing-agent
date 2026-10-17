@@ -80,7 +80,7 @@ uv run nimbus demo --offline
 ```
 
 This is the command built for a 15-20 minute presentation. It makes **no
-network call and no agent call at all** (pre-flight ruling R7 — the spec
+network call and no agent call at all** (the spec
 names "a demo that dies in the room" as the thing to avoid), and produces
 identical output on every run, while still exercising the real
 `crawl_site`/`extract_listing`/`apply_delta`/`heal_site` code — not a
@@ -147,9 +147,42 @@ production:
   exercised against a real page in this repository.
 - **`get_sitemap`'s response size.** Confirmed against a real site, not
   hypothetical: a large sitemap can hand the discovery agent on the order
-  of 200KB of JSON, and in practice the agent read only a fraction of it
-  before answering. Worth fixing before trusting discovery against a much
+  of 200KB of JSON, and in practice the agent read only about a fifth of
+  it before answering. The consequence, not just the symptom: a recipe
+  built from a fifth of a sitemap may miss an entire property category —
+  exactly the failure `_stratified_sample` already prevents one level
+  down, where a sitemap ordered by type put 396 rentals before the first
+  sale listing. Worth fixing before trusting discovery against a much
   larger site than the three this was built and tested against.
+- **No discovery audit trail.** `DISCOVERY_PROMPT_VERSION` is declared
+  and never used, and the `recipes` table records no model, no prompt
+  version, no tokens and no cost — against this project's own stated goal
+  of being able to say which model produced a recipe, under which prompt
+  version, and what it cost. The extraction side has that audit trail;
+  the discovery side, which is the expensive half, does not.
+- **`validate_recipe` is self-certifying.** It checks that the agent's
+  `listing_url_patterns` match the agent's own self-reported
+  `sample_listing_urls` — an agent that invented both passes. The real
+  check is available and not implemented: `HtmlCache` already holds every
+  URL the agent actually fetched during discovery, so the patterns could
+  be validated against observed fetches rather than against a claim.
+- **`heal_site` is write-forward, with no verification and no rollback.**
+  It saves whatever re-discovery returns as the new active version
+  immediately. Nothing re-runs extraction against the repaired recipe to
+  confirm health actually recovered, and nothing reverts to the previous
+  version if it did not — so a bad heal replaces a broken recipe with a
+  differently broken one and reports success. ADR-0002 claims a reviewer
+  can roll back; versions are indeed all retained and `load_recipe_version`
+  can read any of them, but there is no command or code path that does.
+- **The crawler discards the discovery agent's best finding.** For
+  `ashworthholme.co.uk` the agent recorded a sale-only, STC-excluded index
+  URL in `listing_index_urls` — precisely the hard-won, site-specific
+  knowledge the agent exists to produce. `collect_candidate_urls` prefers
+  the sitemap whenever one exists, so the nightly crawl pulls all 195
+  mixed sale/sold/let URLs instead and then spends deterministic filtering
+  (and, before the pre-filter landed, model calls) throwing two thirds of
+  them away. The recipe should be able to say which source is
+  authoritative, rather than the crawler assuming sitemaps always are.
 - **Multi-tenant configuration.** `Settings` is one global `.env`; a real
   fleet needs per-site crawl concurrency, UA strings, and backend choice,
   not one process-wide config.

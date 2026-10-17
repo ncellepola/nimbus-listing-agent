@@ -108,7 +108,9 @@ tools are its *only* way to reach the web — not merely its suggested way.
 The agent's final JSON answer is parsed (`parse_recipe_payload`) and
 structurally validated (`validate_recipe`) — checking things a pydantic
 schema cannot express, chiefly that `listing_url_patterns` actually matches
-the `sample_listing_urls` the agent opened and confirmed. One retry, with
+the `sample_listing_urls` the agent *says* it opened and confirmed --
+self-reported and unverified, which is its own known weakness (see "What
+we'd fix next"). One retry, with
 the validation problems fed back to the agent, is attempted before raising
 `DiscoveryError`.
 

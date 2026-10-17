@@ -1,5 +1,5 @@
 """The `nimbus` CLI. `demo --offline` is the one path this file tests most
-carefully: it is the presentation path (pre-flight ruling R7), and must make
+carefully: it is the presentation path, and must make
 no network call and no agent call at all, succeed even if `discover_site`
 would raise, produce identical output on every run, and disclose in its own
 printed narration (not only in source comments) that step 5's repair is a
@@ -562,3 +562,14 @@ def test_crawl_uses_the_configured_fetch_backend(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert seen and isinstance(seen[0], CrawlbaseBackend)
+
+
+def test_demo_offline_discloses_that_beat_2s_extraction_is_stubbed():
+    """Beat 5 disclosed its stubbed re-discovery in the printed narration;
+    beat 2 did not disclose its stubbed extraction client. The principle
+    applies twice."""
+    result = runner.invoke(app, ["demo", "--offline"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "the extraction model is stubbed" in out

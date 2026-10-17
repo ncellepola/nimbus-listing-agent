@@ -40,7 +40,7 @@ actually called — not a lenient stub that would silently succeed and hide a
 bug, but a hard failure if the cache-first guarantee is ever violated.
 
 Two further substitutions make the "no agent call at all" half of the claim
-true as well, per pre-flight ruling R7:
+true as well:
 
 - The *initial* recipe is loaded directly from a committed fixture
   (`tests/fixtures/recipes/ashworthholme.co.uk.json`) — a recipe the

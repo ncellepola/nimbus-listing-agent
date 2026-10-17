@@ -22,13 +22,13 @@ are where a naive implementation breaks:
 2. `extract_listing` cross-checks the model's reported price against the
    page content actually reachable from the recipe's own `field_hints`
    price location (or a status-bearing `h1`/`h2`/`h3`), never against the
-   page as a whole (pre-flight ruling R26). `ashworthholme.co.uk`'s real
+   page as a whole. `ashworthholme.co.uk`'s real
    fixtures carry 48-49 unrelated pound amounts from a price-filter
    dropdown (£350 to £10,000,000); a bare substring-in-page check passes
    all of them, including the wrong ones, so the search is scoped to where
    the recipe says the real price actually lives.
 
-A page that offers no such location at all (ruling R27 — `bentleyhurst.co.uk`'s
+A page that offers no such location at all (`bentleyhurst.co.uk`'s
 fixtures are client-rendered Gatsby shells with zero headings and zero
 pound signs in the fetched HTML) is rejected before the model is even
 called: there is nothing to corroborate against, so no amount of model
@@ -130,7 +130,7 @@ _PRICE_WIDGET_SELECTOR = "[class*='price'], [id*='price']"
 # literally contains "price" too, but it decorates the whole page's <body>
 # or a top-level wrapper, and matching it would widen the corroboration
 # region back to nearly the entire page: exactly what this function exists
-# to avoid (ruling R26).
+# to avoid: corroboration must stay scoped to where the price lives.
 _MAX_PRICE_WIDGET_CHARS = 300
 
 # Cap on how much markdown page text is sent to the model. The six real
@@ -300,7 +300,7 @@ def _page_markdown(html: str) -> str:
 def _corroboration_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
     """Text from the recipe's own price field-hint location, every
     top-level heading, and any element that names itself as a price
-    widget by class/id. Never the whole page (pre-flight ruling R26) — the
+    widget by class/id. Never the whole page — the
     whole page is exactly where ashworthholme.co.uk's 48-49 unrelated price
     values live.
 
@@ -472,7 +472,9 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
     failed schema validation, failed the residential-sale check, or
     reported a price that could not be corroborated against the page
     (that field is dropped, not trusted) — see the module docstring for the
-    guard layers and ruling R26/R27.
+    guard layers: corroboration is scoped to where the recipe says the
+    price lives, and a page with nothing to corroborate against is
+    rejected before any call is paid for.
     """
     soup = BeautifulSoup(record.html, "html.parser")
     corroboration_text = _corroboration_text(soup, recipe)
@@ -594,7 +596,7 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
 
 
 # --------------------------------------------------------------------------
-# Audit trail (pre-flight rulings R3/R4): this module owns persistence of
+# Audit trail: this module owns persistence of
 # every extraction attempt, successful or not. Task 7 calls only
 # `record_extraction`.
 # --------------------------------------------------------------------------
@@ -647,8 +649,9 @@ def record_extraction(
     cost_usd: float,
 ) -> None:
     """Compose `audit_row` and persist it via `storage.insert_audit`. The
-    only way an extraction attempt reaches the `extraction_audit` table —
-    Task 7 must call this and nothing lower-level (pre-flight ruling R4)."""
+    only way an extraction attempt reaches the `extraction_audit` table:
+    callers use this and never `storage.insert_audit` directly, so every
+    attempt is recorded with the same columns in the same shape."""
     row = audit_row(
         record,
         recipe,

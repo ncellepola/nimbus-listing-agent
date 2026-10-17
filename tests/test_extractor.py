@@ -242,7 +242,7 @@ async def test_extract_listing_wraps_client_failures_in_extraction_error():
 
 async def test_extract_listing_on_a_page_with_no_extractable_fields():
     # bentleyhurst fixtures are client-rendered Gatsby shells with no price,
-    # address or description in the HTML at all (ruling R27).
+    # address or description in the HTML at all.
     recipe = _recipe_from_fixture("bentleyhurst.co.uk")
     record = _record_from_fixture(
         "bentleyhurst.co.uk",
