@@ -573,3 +573,16 @@ def test_demo_offline_discloses_that_beat_2s_extraction_is_stubbed():
     assert result.exit_code == 0, result.output
     out = result.output.lower()
     assert "the extraction model is stubbed" in out
+
+
+def test_demo_offline_never_falls_back_to_a_default_robots_policy(caplog):
+    """`robots_for` fails closed now, so an unseeded robots URL shows up
+    as a WARNING instead of being silently answered with "allow
+    everything". The demo must seed every robots URL it asks for -- both
+    the bare registrable domain the crawl-delay lookup uses and the `www.`
+    host the page fetches use."""
+    with caplog.at_level("WARNING", logger="nimbus.fetch.fetcher"):
+        result = runner.invoke(app, ["demo", "--offline"])
+
+    assert result.exit_code == 0, result.output
+    assert not [r for r in caplog.records if "robots.txt" in r.getMessage()]

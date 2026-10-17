@@ -72,7 +72,18 @@ _SHERBROOKE_URL = (
 )
 _ROSSETT_URL = "https://www.ashworthholme.co.uk/property-details/34782880/-/altrincham/rossett-ave"
 _SITEMAP_URL = "https://www.ashworthholme.co.uk/sitemap.xml"
-_ROBOTS_URL = "https://www.ashworthholme.co.uk/robots.txt"
+# Both hosts, deliberately. The site serves its pages from `www.`, so
+# `Fetcher.get()` resolves robots against `www.ashworthholme.co.uk`,
+# while the crawl-delay lookup asks for the recipe's bare registrable
+# domain. Seeding only the `www.` form left the second lookup as a cache
+# miss -- which the old fail-open `robots_for` silently answered with
+# "allow everything", and which the fail-closed version correctly
+# refuses. Against a live site the bare-domain request redirects to the
+# `www.` one; offline there is nothing to redirect, so both are seeded.
+_ROBOTS_URLS = (
+    "https://www.ashworthholme.co.uk/robots.txt",
+    "https://ashworthholme.co.uk/robots.txt",
+)
 
 # (listing URL, fixture filename shared by the baseline and mutated page
 # directories, the address the page's heading actually carries, the price
@@ -235,7 +246,8 @@ async def run_offline_demo() -> None:
 
         # Seed every URL the crawl will touch before touching it -- the
         # cache-first guarantee ADR-0004 is about, made concrete.
-        cache.put(_ROBOTS_URL, 200, "text/plain", "User-agent: *\nAllow: /\n")
+        for robots_url in _ROBOTS_URLS:
+            cache.put(robots_url, 200, "text/plain", "User-agent: *\nAllow: /\n")
         cache.put(_SITEMAP_URL, 200, "application/xml", _sitemap_xml([p[0] for p in _PAGES]))
         for url, filename, _address, _price in _PAGES:
             cache.put(url, 200, "text/html", (_BASELINE_PAGES_DIR / filename).read_text())
