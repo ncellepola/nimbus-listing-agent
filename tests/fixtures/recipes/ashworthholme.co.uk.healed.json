@@ -1,0 +1,68 @@
+{
+  "domain": "ashworthholme.co.uk",
+  "version": 1,
+  "discovered_at": "2026-10-18T09:12:00Z",
+  "sitemap_urls": [
+    "https://www.ashworthholme.co.uk/sitemap.xml"
+  ],
+  "listing_index_urls": [
+    "https://www.ashworthholme.co.uk/search/?showstc=off&showsold=off&instruction_type=Sale"
+  ],
+  "listing_url_patterns": [
+    "/property-details/*/*/*/*"
+  ],
+  "sample_listing_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34887120/-/sale/sherbrooke-close",
+    "https://www.ashworthholme.co.uk/property-details/34782880/-/altrincham/rossett-ave"
+  ],
+  "pagination": {
+    "kind": "none",
+    "param": null,
+    "max_pages": 1
+  },
+  "field_hints": [
+    {
+      "field": "address",
+      "css_selector": ".listing-heading",
+      "notes": "Re-discovered after a template redesign: the street/town text moved out of <h1> entirely into a plain <div class=\"listing-heading\">. Content is unchanged, only the tag and class are new."
+    },
+    {
+      "field": "price",
+      "css_selector": ".listing-status",
+      "notes": "Same redesign: the status-and-price line moved out of <h2> into <div class=\"listing-status\">, e.g. 'For Sale £850,000'. The old h2 selector now matches nothing on this site."
+    },
+    {
+      "field": "bedrooms",
+      "css_selector": null,
+      "notes": "Unaffected by the redesign: still the first of three bold numbers right after the price block."
+    },
+    {
+      "field": "bathrooms",
+      "css_selector": null,
+      "notes": "Unaffected by the redesign: still the second of the three bold numbers after the price."
+    },
+    {
+      "field": "property_type",
+      "css_selector": "title",
+      "notes": "Unaffected: still the last comma-separated part of the <title> tag."
+    },
+    {
+      "field": "description",
+      "css_selector": "#property-long-description",
+      "notes": "Unaffected by the redesign."
+    },
+    {
+      "field": "tenure",
+      "css_selector": null,
+      "notes": "Unaffected: still unstructured, sometimes in the feature bullets or description text."
+    },
+    {
+      "field": "agent_name",
+      "css_selector": null,
+      "notes": "Unaffected: single-branch agent, Ashworth Holme, 2-4 Washway Road, Sale M33 7QY."
+    }
+  ],
+  "render_required": false,
+  "confidence": 0.75,
+  "notes": "Re-discovery triggered by a collapsed schema_valid_rate: the site's template was redesigned and the price/address content moved out of <h1>/<h2> into <div class=\"listing-heading\">/<div class=\"listing-status\">, which the previous recipe's field_hints (css_selector 'h1'/'h2') no longer reach, so corroboration found nothing and every extraction was rejected before any model call (ruling R27). The sitemap, listing_url_patterns and every other field_hint are unchanged by this redesign -- only the two selectors above moved. This is a committed fixture standing in for a real re-discovery agent run; Task 7's offline demo stubs nimbus.heal.discover_site with this file so the demo's diff-and-version-bump path is real while the agent call it would otherwise make is not."
+}

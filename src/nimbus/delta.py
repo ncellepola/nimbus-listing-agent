@@ -130,6 +130,22 @@ def apply_delta(
         )
         report.withdrawal_suppressed = True
     else:
+        if is_mass_withdrawal:
+            # The override was granted and a mass withdrawal is about to
+            # actually happen -- the one write in this module consequential
+            # enough that it must never go unlogged just because the caller
+            # opted in. Separate from the ERROR branch above: that one is a
+            # refusal, this one is a deliberate, approved action, logged so
+            # it leaves the same audit trail an operator would expect from a
+            # system whose selling point includes one.
+            logger.warning(
+                "apply_delta(%s): withdrawing %d/%d previously stored listing(s) in one run -- "
+                "more than half, proceeding because allow_mass_withdrawal=True was passed "
+                "explicitly. This should be a deliberate, reviewed decision, not a routine one.",
+                domain,
+                len(proposed_withdrawn),
+                stored_count,
+            )
         report.withdrawn = proposed_withdrawn
 
     return report

@@ -13,10 +13,12 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "claude-agent-sdk>=0.2.168",
     "anthropic>=1.15.0",
+    "typer>=0.12",
 ]
 
 [project.scripts]
 nimbus-mcp = "nimbus.mcp_server:main"
+nimbus = "nimbus.cli:app"
 
 [project.optional-dependencies]
 dev = [
@@ -39,6 +41,11 @@ extend-exclude = ["docs/superpowers", ".superpowers"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer's documented pattern is `= typer.Option(...)` in a parameter default;
+# B008 ("no function call in a default") is a false positive for it here.
+"src/nimbus/cli.py" = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

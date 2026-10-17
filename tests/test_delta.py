@@ -158,3 +158,20 @@ def test_apply_delta_allow_mass_withdrawal_overrides_the_guard(tmp_path):
 
     assert set(report.withdrawn) == set(urls)
     assert report.withdrawal_suppressed is False
+
+
+def test_apply_delta_logs_when_mass_withdrawal_override_actually_proceeds(tmp_path, caplog):
+    """An operator-approved mass withdrawal must still leave an audit
+    trace -- a system whose selling point includes an audit trail cannot
+    let the one most consequential write (wiping most of a domain's
+    inventory) happen silently just because the caller opted in."""
+    conn = init_db(tmp_path / "nimbus.db")
+    _seed_five_listings(conn)
+
+    with caplog.at_level("WARNING"):
+        report = apply_delta(conn, DOMAIN, [], allow_mass_withdrawal=True)
+
+    assert len(report.withdrawn) == 5
+    assert report.withdrawal_suppressed is False
+    relevant = [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+    assert any(DOMAIN in r.message and "5" in r.message for r in relevant)
