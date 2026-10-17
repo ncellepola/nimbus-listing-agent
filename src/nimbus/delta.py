@@ -33,7 +33,7 @@ import logging
 import sqlite3
 
 from nimbus import storage
-from nimbus.models import DeltaReport, Listing
+from nimbus.models import CrawlOutcome, DeltaReport, Listing
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,31 @@ logger = logging.getLogger(__name__)
 # failed crawl too, not just the fully empty one. A site does not usually
 # sell off a majority of its stock in a single night.
 _MASS_WITHDRAWAL_FRACTION = 0.5
+
+# How much of a crawl's own *selected* URL set must actually have been
+# fetched before its outcome is trusted to authorise a mass withdrawal.
+# Deliberately not "outcome.fetched > 0": a crawl that selected 1075 URLs
+# and fetched exactly one of them satisfies "fetched > 0" trivially, and
+# that one success is not evidence the other 1074 are gone -- it is
+# evidence the crawl mostly failed, which is precisely the shape
+# _MASS_WITHDRAWAL_FRACTION above exists to catch. Callers at the
+# orchestration layer (nimbus.cli, nimbus.demo) must derive
+# `apply_delta`'s `allow_mass_withdrawal` from `should_allow_mass_withdrawal`,
+# not from any bare truthiness check on `outcome.fetched`.
+MASS_WITHDRAWAL_FETCH_RATIO = 0.9
+
+
+def should_allow_mass_withdrawal(
+    outcome: CrawlOutcome, *, min_fetch_ratio: float = MASS_WITHDRAWAL_FETCH_RATIO
+) -> bool:
+    """Whether `outcome` fetched enough of its own selected URLs to trust
+    a proposed mass withdrawal as real rather than as a failed or partial
+    crawl. `outcome.selected == 0` (no candidates matched this recipe's
+    patterns at all -- recipe drift, not a quiet night) is never trusted
+    either, for the same reason."""
+    if outcome.selected == 0:
+        return False
+    return outcome.fetched >= outcome.selected * min_fetch_ratio
 
 
 def apply_delta(

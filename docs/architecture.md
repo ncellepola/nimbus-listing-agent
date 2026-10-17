@@ -150,9 +150,9 @@ discarded and must not require re-crawling to recover.
 
 `crawl_delay` is deliberately **not** read from the recipe. It is resolved
 fresh, at the orchestration call site (`cli.py`'s `crawl` command and
-`demo --offline`), via `await fetcher.robots_for(domain)` — live robots.txt
-policy, which can tighten between recipe refreshes, whereas the recipe
-itself can go weeks without being re-discovered.
+`nimbus.demo`'s own crawl steps), via `await fetcher.robots_for(domain)` —
+live robots.txt policy, which can tighten between recipe refreshes, whereas
+the recipe itself can go weeks without being re-discovered.
 
 ### `extractor.py` — one LLM call per page, never trusted alone
 
@@ -219,14 +219,39 @@ never read as an overnight sell-off — and, when that override *is* passed
 and a mass withdrawal does proceed, it is logged at `WARNING` so the one
 most consequential write this module can make is never silent.
 
-### `cli.py` — the orchestration layer
+That guard is only as good as what a caller passes into it, which is why
+`delta.py` also owns `should_allow_mass_withdrawal(outcome)`: every
+orchestration call site derives `apply_delta`'s `allow_mass_withdrawal`
+from it, never from a bare `outcome.fetched > 0`. `fetched > 0` is
+satisfied by a single lucky page out of a thousand selected ones —
+exactly the failed-crawl-looks-like-a-sell-off shape the guard above exists
+to catch, reopened one layer up if the integration code derives the flag
+from "something worked" instead of from how complete the crawl actually
+was. `should_allow_mass_withdrawal` instead requires at least 90% of the
+crawl's own *selected* URLs to have been fetched (a named constant,
+`MASS_WITHDRAWAL_FETCH_RATIO`).
 
-Five commands: `onboard`, `crawl`, `heal`, `report`, `demo`. `crawl` is
-where the `crawl_delay = await fetcher.robots_for(domain)` call site and the
-`allow_mass_withdrawal=outcome.fetched > 0` derivation both actually live —
+### `cli.py` — the orchestration layer, and `demo.py` — the presentation path
+
+`cli.py` is five thin commands: `onboard`, `crawl`, `heal`, `report`, and
+`demo` (which just calls into `nimbus.demo`). `crawl` is where the
+`crawl_delay = await fetcher.robots_for(domain)` call site and the
+`should_allow_mass_withdrawal(outcome)` derivation both actually live —
 Task 4-6 built the primitives; Task 7 is where they are wired together into
-something that runs end to end. See `docs/adr/0004-cache-first-fetch-for-reproducible-demos.md`
-for how `demo --offline` drives the same real code deterministically.
+something that runs end to end.
+
+`demo.py` is a separate module, not a larger `cli.py`, because it is a
+different responsibility from wiring a command to a function: it is
+roughly three hundred lines of fixtures, stub classes, and two full
+end-to-end narrators (`run_offline_demo`, `run_live_demo`). `console.py` is
+smaller still — just the printed-output helpers (`banner`, `print_delta`,
+`print_health`, `format_price`) both `cli.py` and `demo.py` need, split out
+to avoid a circular import between the two. See
+`docs/adr/0004-cache-first-fetch-for-reproducible-demos.md` for how
+`demo --offline` drives the same real code deterministically — and for the
+honest limit on what that proves: `run_offline_demo`'s own printed output
+says, in the room, that its repair step is a stubbed fixture, not the agent
+inferring the fix live.
 
 ## The production path
 

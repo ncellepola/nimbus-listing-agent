@@ -10,7 +10,8 @@ import sqlite3
 from conftest import make_listing
 
 from nimbus import storage
-from nimbus.delta import apply_delta
+from nimbus.delta import apply_delta, should_allow_mass_withdrawal
+from nimbus.models import CrawlOutcome
 from nimbus.storage import init_db
 
 DOMAIN = "ashworthholme.co.uk"
@@ -158,6 +159,47 @@ def test_apply_delta_allow_mass_withdrawal_overrides_the_guard(tmp_path):
 
     assert set(report.withdrawn) == set(urls)
     assert report.withdrawal_suppressed is False
+
+
+def _outcome(*, selected: int, fetched: int) -> CrawlOutcome:
+    return CrawlOutcome(
+        domain=DOMAIN,
+        records=[],
+        candidates=selected,
+        selected=selected,
+        fetched=fetched,
+        skipped_robots=0,
+        skipped_errors=selected - fetched,
+    )
+
+
+def test_should_allow_mass_withdrawal_refuses_a_mostly_failed_crawl():
+    """A crawl that selected 1075 URLs and fetched exactly 1 of them must
+    not authorise a mass withdrawal just because `fetched > 0` -- that is
+    the exact "failed crawl looks like an overnight sell-off" shape
+    apply_delta's own guard exists to catch, re-opened at the integration
+    layer if the caller derives the flag from "something worked" alone."""
+    assert should_allow_mass_withdrawal(_outcome(selected=1075, fetched=1)) is False
+
+
+def test_should_allow_mass_withdrawal_permits_a_complete_crawl():
+    assert should_allow_mass_withdrawal(_outcome(selected=2, fetched=2)) is True
+
+
+def test_should_allow_mass_withdrawal_permits_at_the_ratio_boundary():
+    # 9/10 == the default 0.9 threshold exactly -- >=, not >.
+    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=9)) is True
+
+
+def test_should_allow_mass_withdrawal_refuses_just_under_the_boundary():
+    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=8)) is False
+
+
+def test_should_allow_mass_withdrawal_refuses_when_nothing_was_selected():
+    # No candidates matched at all is itself a failure signal (recipe
+    # drift), not evidence that it is safe to treat an empty run as a real
+    # mass withdrawal.
+    assert should_allow_mass_withdrawal(_outcome(selected=0, fetched=0)) is False
 
 
 def test_apply_delta_logs_when_mass_withdrawal_override_actually_proceeds(tmp_path, caplog):

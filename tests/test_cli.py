@@ -1,25 +1,33 @@
 """The `nimbus` CLI. `demo --offline` is the one path this file tests most
 carefully: it is the presentation path (pre-flight ruling R7), and must make
 no network call and no agent call at all, succeed even if `discover_site`
-would raise, and produce identical output on every run.
+would raise, produce identical output on every run, and disclose in its own
+printed narration (not only in source comments) that step 5's repair is a
+stubbed fixture rather than a live re-discovery.
 
 Every other command (`onboard`, `crawl`, `heal`) does touch the live network
-and, for `onboard`/`heal`, the live discovery agent -- this file exercises
-only their early, no-network error paths (a missing recipe, nothing
-onboarded yet), never their real bodies, so running this suite never spends
-real API credits.
+and, for `onboard`/`heal`, the live discovery agent -- this file never runs
+their real bodies, so running this suite never spends real API credits.
+What it does cover, all without touching the network: `crawl`'s no-saved-
+recipe error path; `onboard`/`heal`'s no-API-key error path (free to test --
+`discover_site` itself raises `DiscoveryError` before any network call when
+no key is configured); and, most importantly, `crawl`'s own
+`allow_mass_withdrawal` decision against a mocked `CrawlOutcome` representing
+a mostly-failed crawl, with the real `apply_delta` and the real
+`should_allow_mass_withdrawal` both left unmocked.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from conftest import make_recipe
 from typer.testing import CliRunner
 
 from nimbus.cli import app
-from nimbus.models import Listing, PropertyType, Tenure
-from nimbus.storage import init_db, save_recipe, upsert_listing
+from nimbus.models import CrawlOutcome, Listing, PropertyType, Tenure
+from nimbus.storage import init_db, list_listings, save_recipe, upsert_listing
 
 runner = CliRunner()
 
@@ -136,3 +144,102 @@ def test_demo_offline_narrates_the_health_collapse_and_recovery():
     assert "schema_valid_rate=0%" in out
     assert "schema_valid_rate=100%" in out
     assert "v1 -> v2" in out
+
+
+def test_demo_offline_discloses_that_step_5s_repair_is_stubbed():
+    """Someone watching the presentation must not come away believing the
+    agent just inferred the fix for the simulated redesign -- the stub is
+    disclosed in source comments, the ADR, the README, and heal_site's own
+    docstring, but none of those are visible during a live run, so the
+    printed narration itself must say so."""
+    result = runner.invoke(app, ["demo", "--offline"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "stubbed" in out
+    assert "nimbus heal" in out
+
+
+def test_onboard_without_api_key_fails_cleanly_without_network(tmp_path, monkeypatch):
+    """discover_site itself raises DiscoveryError before any network call
+    when no key is configured -- the free path, costing nothing to test."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    db = tmp_path / "nimbus.db"
+    init_db(db)
+
+    result = runner.invoke(app, ["--db", str(db), "onboard", "some-example.co.uk"])
+
+    assert result.exit_code == 1
+    assert "anthropic_api_key" in result.output.lower()
+
+
+def test_heal_without_api_key_fails_cleanly_without_network(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    db = tmp_path / "nimbus.db"
+    _seed_db(db)
+
+    result = runner.invoke(app, ["--db", str(db), "heal", DOMAIN])
+
+    assert result.exit_code == 1
+    assert "anthropic_api_key" in result.output.lower()
+
+
+def test_crawl_never_derives_allow_mass_withdrawal_from_fetched_greater_than_zero_alone(
+    tmp_path, monkeypatch
+):
+    """A crawl that selected 1075 URLs and fetched exactly 1 of them must
+    not authorise withdrawing the other 1074 previously stored listings
+    just because `outcome.fetched > 0` is trivially true -- the exact
+    failed-crawl-looks-like-a-sell-off shape `nimbus.delta.apply_delta`'s
+    own guard exists to catch, which a bare `fetched > 0` reopens at this
+    integration layer. Mocks only the crawl outcome and the two I/O
+    boundaries (robots resolution, the Anthropic client) `crawl` builds
+    for real -- the actual `allow_mass_withdrawal` decision and the real
+    `apply_delta` both run unmocked."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+    stored_urls = [f"https://www.{DOMAIN}/property-details/{n}" for n in range(10)]
+    for n, url in enumerate(stored_urls):
+        upsert_listing(
+            conn,
+            Listing(
+                source_domain=DOMAIN,
+                source_url=url,
+                address=f"{n} Example Street, Sale",
+                price_gbp=100_000 + n,
+                property_type=PropertyType.DETACHED,
+                tenure=Tenure.FREEHOLD,
+                content_hash=f"hash{n}",
+            ),
+        )
+
+    mostly_failed_outcome = CrawlOutcome(
+        domain=DOMAIN,
+        records=[],
+        candidates=1075,
+        selected=1075,
+        fetched=1,
+        skipped_robots=0,
+        skipped_errors=1074,
+    )
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return mostly_failed_outcome
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    remaining = {listing.source_url for listing in list_listings(conn, DOMAIN)}
+    assert remaining == set(stored_urls), "a mostly-failed crawl must not withdraw anything"
+    assert "withdrawn=0" in result.output
+    assert "withdrawal suppressed" in result.output.lower()

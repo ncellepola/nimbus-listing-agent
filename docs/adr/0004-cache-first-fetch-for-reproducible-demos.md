@@ -31,7 +31,7 @@ downstream of `Fetcher.get()`.
 
 ## Decision
 
-`nimbus demo --offline` (Task 7, `src/nimbus/cli.py`) pre-seeds a throwaway
+`nimbus demo --offline` (Task 7, `src/nimbus/demo.py`) pre-seeds a throwaway
 `HtmlCache` with real, captured HTML fixtures (`tests/fixtures/pages/`) and a
 synthetic robots.txt/sitemap built to match them, then runs the real
 `crawl_site`, `extract_listing`, `apply_delta`, and `heal_site` against that
@@ -87,3 +87,10 @@ same functions.
   claim that the real discovery agent would necessarily re-learn any given
   real redesign unaided — see `nimbus.heal.heal_site`'s own docstring, which
   states this distinction for the same reason.
+- That distinction is stated in this ADR, `heal_site`'s docstring, the
+  README, and `demo.py`'s module docstring — none of which a live audience
+  sees during a presentation. `run_offline_demo`'s own printed narration
+  for step 5 therefore says so directly ("offline mode: re-discovery is
+  stubbed from a committed fixture -- run `nimbus heal` for the real
+  agent"), not only in the surrounding prose: a caveat that exists only in
+  source and documentation is not a caveat the room gets.

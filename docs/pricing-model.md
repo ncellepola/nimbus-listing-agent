@@ -55,6 +55,35 @@ training data. They are still usable for inference once the model exists, and
 they are the bulk of what the "is this new listing priced right" question
 is actually asked about day to day.
 
+**This join has a selection bias worth naming, not discovering later.**
+Whether a listing resolves to a matched Price Paid sale at all is not
+random with respect to price: a correctly-priced or underpriced listing
+sells faster and more often than an overpriced one, which is more likely to
+sit, reprice downward, be withdrawn unsold, or relist under a different
+agent — none of which produces a Price Paid match in the window this join
+looks in. The training set is therefore systematically short of exactly
+the overpriced listings the product exists to flag, which biases the
+model's learned notion of "expected price" upward relative to true expected
+price in whatever segments overpricing is common, and biases it in the
+specific direction that makes the model *under*-detect overpricing — the
+failure mode that matters most here, not a neutral one. Two mitigations,
+not mutually exclusive: (1) explicitly model the probability a listing
+matches at all (a second, auxiliary model predicting "does this listing
+resolve to a sale within the window," using the same features) and
+inverse-weight matched rows by it during training, so an overpriced
+listing's rarer matches count for more; or (2) treat every unmatched
+withdrawal as **censored**, not absent — known to have *not* sold at its
+asking price within the window, which is itself informative about that
+price being too high, and worth a survival-analysis-style treatment (e.g.
+a Cox model or an accelerated-failure-time model on time-to-sale, with
+withdrawal-without-sale as right-censoring) rather than being silently
+excluded from everything. Either mitigation is a second pass, not a
+blocker to building the join at all; the point of naming it here is that
+"the model's residuals look fine on held-out matched data" is not, by
+itself, evidence the model is well-calibrated against the full population
+of new listings, including the overpriced ones that are disproportionately
+absent from that held-out set.
+
 ## 2. Target: predict price from Price Paid, not asking price from itself
 
 The model is trained to predict **log(sale price)** from Price Paid-matched

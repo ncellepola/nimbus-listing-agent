@@ -86,7 +86,8 @@ discovery agent genuinely captured against the live site:
 4. **Health collapse** — `schema_valid_rate` drops to 0%; `needs_heal`
    flips to `True`.
 5. **Repair** — re-discovery (stubbed with a committed fixture, not a live
-   agent call), a version bump (v1 → v2), a readable diff of exactly which
+   agent call — the printed output says so directly, not only this
+   README), a version bump (v1 → v2), a readable diff of exactly which
    field hints changed, and extraction recovering to 100%.
 
 Other commands (`onboard <domain>`, `crawl <domain>`, `heal <domain>`,
@@ -118,6 +119,14 @@ production:
   records `0` for `input_tokens`/`output_tokens`/`cost_usd` rather than the
   real numbers. `schema_valid`/`needs_review` — what the health monitor
   actually reads — are unaffected.
+- **Selection bias in any future Price Paid-matched training set.**
+  `docs/pricing-model.md` names this explicitly: listings that resolve to a
+  matched sale within the join window are not a random sample of all
+  listings, which biases a trained model's notion of "expected price" in
+  the direction that under-detects overpricing — the thing the pricing
+  model would exist to detect. Nothing mitigates this yet because no
+  pricing model exists yet; the document names two mitigations for when
+  one is built.
 - **JS-rendering actually wired up.** `CrawlbaseBackend` is a configured
   seam (`fetch_backend = "crawlbase"` in `Settings`) for sites like
   `bentleyhurst.co.uk` that need a headless browser; it has never been
@@ -144,8 +153,10 @@ src/nimbus/
   crawler.py        The deterministic nightly crawl -- zero LLM dependency
   extractor.py      One LLM call per page + deterministic price/sale guards + audit trail
   heal.py           site_health / needs_heal / heal_site
-  delta.py          apply_delta: new / price_changed / withdrawn / unchanged
-  cli.py            onboard / crawl / heal / report / demo
+  delta.py          apply_delta, should_allow_mass_withdrawal: new / price_changed / withdrawn / unchanged
+  cli.py            onboard / crawl / heal / report / demo (thin -- demo delegates to demo.py)
+  demo.py           the demo harness: fixtures, stub classes, run_offline_demo / run_live_demo
+  console.py        shared printed-output helpers (banner, print_delta, print_health, format_price)
 docs/
   architecture.md           component walkthrough + production path
   pricing-model.md          the written answer to the assignment's second half
