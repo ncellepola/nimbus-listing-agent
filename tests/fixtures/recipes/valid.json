@@ -10,6 +10,10 @@
   ],
   "listing_index_urls": [],
   "listing_url_patterns": ["/property-details/*"],
+  "sample_listing_urls": [
+    "https://www.ashworthholme.co.uk/property-details/34612724/-/sale/alcester-road",
+    "https://www.ashworthholme.co.uk/property-details/34612800/-/sale/mill-lane"
+  ],
   "pagination": {"kind": "none", "param": null, "max_pages": 1},
   "field_hints": [
     {"field": "price", "css_selector": ".property-price", "notes": null},

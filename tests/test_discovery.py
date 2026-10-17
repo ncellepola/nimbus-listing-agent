@@ -59,19 +59,27 @@ def test_parse_recipe_payload_rejects_schema_violation():
 
 
 def test_validate_recipe_flags_pattern_matching_no_sample_urls():
+    # SAMPLE_URLS are genuine listing pages; sample_listing_urls is where a
+    # real recipe carries them (not sitemap_urls/listing_index_urls, which
+    # are index pages, not listings).
     recipe_with_bogus_pattern = make_recipe(
         listing_url_patterns=["/this-pattern-matches-nothing/*"],
+        sample_listing_urls=SAMPLE_URLS,
     )
 
-    problems = validate_recipe(recipe_with_bogus_pattern, SAMPLE_URLS)
+    problems = validate_recipe(
+        recipe_with_bogus_pattern, recipe_with_bogus_pattern.sample_listing_urls
+    )
 
     assert any("matches none" in p for p in problems)
 
 
 def test_validate_recipe_passes_a_sound_recipe():
-    recipe = make_recipe(listing_url_patterns=["/property-details/*"])
+    recipe = make_recipe(
+        listing_url_patterns=["/property-details/*"], sample_listing_urls=SAMPLE_URLS
+    )
 
-    problems = validate_recipe(recipe, SAMPLE_URLS)
+    problems = validate_recipe(recipe, recipe.sample_listing_urls)
 
     assert problems == []
 
@@ -91,6 +99,16 @@ def test_validate_recipe_flags_no_listing_url_patterns():
     problems = validate_recipe(r, [])
 
     assert any("listing_url_patterns" in p for p in problems)
+
+
+def test_validate_recipe_flags_empty_sample_listing_urls():
+    # A recipe with no confirmed example listing pages is not a validated
+    # recipe, regardless of whatever sample_urls a caller happens to pass.
+    r = make_recipe(sample_listing_urls=[])
+
+    problems = validate_recipe(r, [])
+
+    assert any("sample_listing_urls" in p for p in problems)
 
 
 async def test_discover_site_requires_api_key():

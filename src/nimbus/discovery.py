@@ -17,7 +17,9 @@ so they can be exercised in fast offline tests:
 - `validate_recipe` runs extra, structural sanity checks a pydantic schema
   cannot express on its own — chiefly that the recipe actually has a source
   of listing URLs (a sitemap or a listing index) and that its
-  `listing_url_patterns` match at least one real sample URL.
+  `listing_url_patterns` match the `sample_listing_urls` the agent actually
+  opened and confirmed were listings (not sitemap/index URLs, which are
+  never listing pages themselves).
 
 `discover_site` is the only part of this module that is not pure: it drives
 `claude_agent_sdk.query` against the Task 2 MCP server (`get_robots`,
@@ -145,6 +147,12 @@ def validate_recipe(recipe: SiteRecipe, sample_urls: list[str]) -> list[str]:
             "fetched URLs are listing pages"
         )
 
+    if not recipe.sample_listing_urls:
+        problems.append(
+            "recipe has no sample_listing_urls; a recipe with no confirmed example "
+            "listing pages is not a validated recipe"
+        )
+
     if sample_urls:
         for pattern in recipe.listing_url_patterns:
             if not any(_matches_pattern(url, pattern) for url in sample_urls):
@@ -245,10 +253,6 @@ async def _run_agent(prompt: str, options) -> str:
     return last_assistant_text
 
 
-def _sample_urls_for(recipe: SiteRecipe) -> list[str]:
-    return (recipe.sitemap_urls + recipe.listing_index_urls)[:50]
-
-
 async def discover_site(domain: str, *, settings: Settings, max_turns: int = 20) -> SiteRecipe:
     """Explore `domain` through the Task 2 MCP tools and return a
     schema-validated, structurally sound `SiteRecipe`. Retries once with
@@ -265,7 +269,7 @@ async def discover_site(domain: str, *, settings: Settings, max_turns: int = 20)
     text = await _run_agent(prompt, options)
     try:
         recipe = parse_recipe_payload(text, domain)
-        problems = validate_recipe(recipe, _sample_urls_for(recipe))
+        problems = validate_recipe(recipe, recipe.sample_listing_urls)
     except RecipeParseError as exc:
         recipe, problems = None, [str(exc)]
 
@@ -281,7 +285,7 @@ async def discover_site(domain: str, *, settings: Settings, max_turns: int = 20)
             f"discovery for {domain} failed twice; second attempt's output was unparsable: {exc}"
         ) from exc
 
-    problems = validate_recipe(recipe, _sample_urls_for(recipe))
+    problems = validate_recipe(recipe, recipe.sample_listing_urls)
     if problems:
         raise DiscoveryError(
             f"discovery for {domain} failed validation twice; remaining problems: "

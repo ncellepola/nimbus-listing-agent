@@ -78,6 +78,12 @@ class SiteRecipe(BaseModel):
     sitemap_urls: list[str] = Field(default_factory=list)
     listing_index_urls: list[str] = Field(default_factory=list)
     listing_url_patterns: list[str] = Field(default_factory=list)
+    # URLs of individual listing pages the discovery agent actually opened
+    # and confirmed were residential sales listings -- the evidence behind
+    # listing_url_patterns, and what validate_recipe checks the pattern
+    # against (not sitemap_urls/listing_index_urls, which are index pages,
+    # not listings).
+    sample_listing_urls: list[str] = Field(default_factory=list)
     pagination: PaginationRule | None = None
     field_hints: list[FieldHint] = Field(default_factory=list)
     render_required: bool = False

@@ -31,11 +31,20 @@ site, night after night, without you. Work through the site like this:
 4. Open two or three sample pages you believe are individual listing pages
    with `fetch_page` and confirm they are genuinely residential **sale**
    listings (an address, a price, bedrooms, a description) — not lettings,
-   not commercial, not a search form with no results.
+   not commercial, not a search form with no results. Keep the exact URL of
+   every page you confirm this way: these are your `sample_listing_urls`,
+   the evidence for the pattern you report in step 5, and you must report
+   at least two of them.
 5. From what you have seen, work out:
    - `listing_url_patterns`: one or more glob-style patterns (e.g.
      `/property-details/*` or `/properties/for-sale/*`) that match listing
      page URLs and nothing else.
+   - `sample_listing_urls`: at least two full URLs, from step 4, of
+     individual property listing pages you personally opened with
+     `fetch_page` and confirmed were residential sale listings. These must
+     be listing pages themselves — never a sitemap URL, never a listing
+     index/search-results page, and never a URL you only saw in a list
+     without opening it.
    - `pagination`: how the listing index paginates, if you used one —
      `kind` is `"query_param"` (give the `param` name, e.g. `"page"`),
      `"path"` (e.g. `/page/2/`), or `"none"` if there is no pagination or you
@@ -65,6 +74,7 @@ object must have exactly this shape:
   "sitemap_urls": ["..."],
   "listing_index_urls": ["..."],
   "listing_url_patterns": ["..."],
+  "sample_listing_urls": ["...", "..."],
   "pagination": {"kind": "query_param", "param": "page", "max_pages": 20},
   "field_hints": [{"field": "price", "css_selector": null, "notes": "..."}],
   "render_required": false,
