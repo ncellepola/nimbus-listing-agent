@@ -63,6 +63,14 @@ exercised by tests; it exists so that a real deployment can point
 problem sites at a paid service without touching `Fetcher`, the MCP
 tools, or anything upstream of the backend boundary.
 
+That last claim was initially only half true: the `fetch_backend`
+setting was read by `mcp_server.main()` alone, so the nightly crawl path
+and the live demo both hardcoded `HttpxBackend` and setting
+`FETCH_BACKEND=crawlbase` silently changed nothing for them. All three
+entry points now build their backend through
+`nimbus.fetch.backends.build_backend(settings)`, which is the one place
+the switch is read.
+
 ## Consequences
 
 - The enforcement point for robots compliance is a few lines of Python

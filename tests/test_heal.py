@@ -17,8 +17,14 @@ from conftest import make_recipe
 
 import nimbus.heal as heal
 from nimbus.extractor import extract_listing, record_extraction
-from nimbus.heal import DEFAULT_HEAL_THRESHOLD, heal_site, needs_heal, site_health
-from nimbus.models import CrawlRecord, FieldHint, SiteHealth, SiteRecipe
+from nimbus.heal import (
+    DEFAULT_HEAL_THRESHOLD,
+    heal_site,
+    needs_attention,
+    needs_heal,
+    site_health,
+)
+from nimbus.models import CrawlRecord, FieldHint, RejectionReason, SiteHealth, SiteRecipe
 from nimbus.storage import init_db, insert_audit, save_recipe
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -333,7 +339,7 @@ async def test_health_collapses_on_mutated_pages_and_recovers_after_heal(tmp_pat
     # renamed containers the old recipe's field_hints (css_selector "h1"/
     # "h2") no longer reach. The old recipe's own corroboration region is
     # now empty for every one of these pages, so extraction is rejected
-    # before a model is even called (ruling R27) -- schema_valid=False.
+    # before a model is even called -- schema_valid=False.
     for relpath, slug, price in MUTATED_PAGES:
         await _extract_and_record(conn, old_recipe, relpath, slug, price)
 
@@ -376,3 +382,160 @@ async def test_heal_site_against_the_real_agent(tmp_path):
 
     assert recipe.version == 1
     assert diff
+
+
+# --------------------------------------------------------------------------
+# A correctly-rejected non-sale page is not drift. `extract_listing`
+# deliberately routes Sold-STC and To-Let pages through the model so
+# `is_residential_sale` can reject them; recording that as
+# `schema_valid=False` made a *correct* recipe on the demo's own site read
+# as a collapsed one, which with a scheduler would call the discovery
+# agent nightly, forever, inverting the whole cost argument.
+# --------------------------------------------------------------------------
+
+# The real ashworthholme.co.uk mix, measured over all 18 pages this repo
+# has cached for that domain: 6 "For Sale", 11 "Sold Subject to Contract",
+# 1 "To Let". Before the fix, that produced schema_valid_rate=0.333 and
+# needs_heal=True against a recipe that was working perfectly.
+_ASHWORTH_FOR_SALE = 6
+_ASHWORTH_SOLD_STC = 11
+_ASHWORTH_TO_LET = 1
+
+
+def _record_non_sale(conn, n: int) -> None:
+    insert_audit(
+        conn,
+        url=_audit_url(n),
+        model="claude-sonnet-5",
+        prompt_version="v1",
+        recipe_version=1,
+        html_hash=f"hash{n}",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0,
+        schema_valid=False,
+        needs_review=True,
+        rejection_reason=RejectionReason.NOT_RESIDENTIAL_SALE.value,
+    )
+
+
+def _record_sale(conn, n: int) -> None:
+    insert_audit(
+        conn,
+        url=_audit_url(n),
+        model="claude-sonnet-5",
+        prompt_version="v1",
+        recipe_version=1,
+        html_hash=f"hash{n}",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0,
+        schema_valid=True,
+        needs_review=False,
+        rejection_reason=None,
+    )
+
+
+def test_deliberate_non_sale_exclusions_do_not_read_as_drift(tmp_path):
+    """The exact mix of this repo's own 18 cached ashworthholme.co.uk
+    pages, against a correct recipe: every page was handled correctly, so
+    the site must not be reported as needing heal."""
+    conn = init_db(tmp_path / "nimbus.db")
+    n = 0
+    for _ in range(_ASHWORTH_FOR_SALE):
+        _record_sale(conn, n)
+        n += 1
+    for _ in range(_ASHWORTH_SOLD_STC + _ASHWORTH_TO_LET):
+        _record_non_sale(conn, n)
+        n += 1
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert health.deliberate_exclusions == _ASHWORTH_SOLD_STC + _ASHWORTH_TO_LET
+    assert health.sample_size == _ASHWORTH_FOR_SALE
+    assert health.schema_valid_rate == 1.0
+    assert needs_heal(health) is False
+
+
+def test_a_real_extraction_failure_still_reads_as_drift(tmp_path):
+    """The other half of the same change: excluding deliberate exclusions
+    must not blunt the signal the heal subsystem exists for. A page that
+    failed for any reason other than "this is not a sale" still counts."""
+    conn = init_db(tmp_path / "nimbus.db")
+    for n in range(10):
+        insert_audit(
+            conn,
+            url=_audit_url(n),
+            model="claude-sonnet-5",
+            prompt_version="v1",
+            recipe_version=1,
+            html_hash=f"hash{n}",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            schema_valid=False,
+            needs_review=True,
+            rejection_reason=RejectionReason.NO_CORROBORATION_REGION.value,
+        )
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert health.deliberate_exclusions == 0
+    assert health.sample_size == 10
+    assert health.schema_valid_rate == 0.0
+    assert needs_heal(health) is True
+
+
+def test_a_site_of_nothing_but_sold_stock_is_not_reported_as_needing_heal(tmp_path):
+    """Every page correctly excluded leaves no evidence either way --
+    the same reasoning `sample_size == 0` already uses. Reporting
+    needs_heal here would send the agent back in against a site whose
+    recipe is working perfectly and which simply has no stock on."""
+    conn = init_db(tmp_path / "nimbus.db")
+    for n in range(8):
+        _record_non_sale(conn, n)
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert health.sample_size == 0
+    assert health.deliberate_exclusions == 8
+    assert needs_heal(health) is False
+
+
+def test_a_domain_whose_every_page_was_excluded_needs_attention(tmp_path):
+    """B3's second half. Dropping deliberate exclusions from the
+    denominator is right, but it means a bug that mislabels every page as
+    a non-sale leaves `sample_size == 0`, which `needs_heal` reads as "no
+    evidence" and reports as healthy -- silent, free, and invisible in
+    exactly the drift scenario the monitor exists for. That shape gets its
+    own state."""
+    conn = init_db(tmp_path / "nimbus.db")
+    for n in range(8):
+        _record_non_sale(conn, n)
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert needs_heal(health) is False, "sending the agent at an all-sold site is wrong"
+    assert needs_attention(health) is True
+
+
+def test_a_domain_with_no_history_at_all_needs_no_attention(tmp_path):
+    conn = init_db(tmp_path / "nimbus.db")
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert health.sample_size == 0
+    assert needs_attention(health) is False
+
+
+def test_a_healthy_domain_needs_no_attention(tmp_path):
+    conn = init_db(tmp_path / "nimbus.db")
+    for n in range(6):
+        _record_sale(conn, n)
+    for n in range(6, 18):
+        _record_non_sale(conn, n)
+
+    health = site_health(conn, DOMAIN, window=50)
+
+    assert needs_heal(health) is False
+    assert needs_attention(health) is False

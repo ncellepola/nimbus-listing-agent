@@ -19,6 +19,7 @@ wires up real settings/cache/backend and runs that server over stdio.
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from urllib.parse import urlsplit
@@ -26,9 +27,9 @@ from urllib.parse import urlsplit
 from mcp.server.mcpserver import MCPServer
 
 from nimbus.config import Settings
-from nimbus.fetch.backends import CrawlbaseBackend, HttpxBackend
+from nimbus.fetch.backends import build_backend
 from nimbus.fetch.cache import HtmlCache
-from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
+from nimbus.fetch.fetcher import Fetcher, FetchError, RobotsDisallowed
 from nimbus.fetch.sitemap import is_sitemap_index, locs
 from nimbus.htmltext import html_to_markdown
 
@@ -37,6 +38,8 @@ from nimbus.htmltext import html_to_markdown
 # (see _stratified_sample) with enough URLs surviving to cover more than
 # one property-type/branch/date grouping.
 _SAMPLE_SIZE = 25
+
+logger = logging.getLogger(__name__)
 
 
 def _stratified_sample(urls: list[str], size: int) -> list[str]:
@@ -92,6 +95,15 @@ def _make_get_sitemap(fetcher: Fetcher) -> Callable:
                 page = await fetcher.get(root_url)
             except RobotsDisallowed:
                 continue
+            except FetchError:
+                # Includes FetchStatusError. `roots` falls back to a
+                # *guessed* https://{domain}/sitemap.xml when robots.txt
+                # declares none, so a 404 here is the ordinary "this site
+                # has no sitemap" case (jaksandco.co.uk, in this repo's
+                # own fixtures) and must leave the agent free to fall
+                # back to a listing index -- not end its tool call.
+                logger.warning("get_sitemap: could not fetch %s; skipping", root_url)
+                continue
             try:
                 root = ET.fromstring(page.body)
             except ET.ParseError:
@@ -106,6 +118,11 @@ def _make_get_sitemap(fetcher: Fetcher) -> Callable:
                     try:
                         child_page = await fetcher.get(child_loc)
                     except RobotsDisallowed:
+                        continue
+                    except FetchError:
+                        logger.warning(
+                            "get_sitemap: could not fetch child sitemap %s; skipping", child_loc
+                        )
                         continue
                     try:
                         child_root = ET.fromstring(child_page.body)
@@ -144,6 +161,21 @@ def _make_fetch_page(fetcher: Fetcher) -> Callable:
             page = await fetcher.get(url)
         except RobotsDisallowed:
             return {"error": "robots_disallowed", "url": url, "domain": domain}
+        except FetchError as exc:
+            # A dead or erroring URL comes back as data the agent can
+            # reason about and route around, exactly as a disallowed one
+            # does. Raising would end the whole tool call over one bad
+            # page -- and `Fetcher.get()` raises on any non-2xx now, so
+            # a single 404 in a sitemap would have done it.
+            status = getattr(exc, "status", None)
+            logger.warning("fetch_page: %s", exc)
+            return {
+                "error": "http_error" if status is not None else "fetch_failed",
+                "url": url,
+                "domain": domain,
+                "status": status,
+                "detail": str(exc),
+            }
 
         content = html_to_markdown(page.body) if as_markdown else page.body
         truncated = len(content) > max_chars
@@ -181,12 +213,7 @@ def build_server(fetcher: Fetcher) -> MCPServer:
 def main() -> None:
     settings = Settings()
     cache = HtmlCache(root=settings.cache_dir)
-    if settings.fetch_backend == "crawlbase":
-        token = settings.crawlbase_token.get_secret_value() if settings.crawlbase_token else ""
-        backend = CrawlbaseBackend(token=token, user_agent=settings.user_agent)
-    else:
-        backend = HttpxBackend(user_agent=settings.user_agent)
-    fetcher = Fetcher(settings, cache, backend)
+    fetcher = Fetcher(settings, cache, build_backend(settings))
     build_server(fetcher).run()
 
 

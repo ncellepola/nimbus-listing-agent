@@ -1,7 +1,15 @@
 """Content-addressed disk cache for fetched pages.
 
-Cache-first: a URL already on disk is never re-fetched, so the demo (and
-the test suite) runs offline and byte-identically on every run.
+Cache-first: a URL already on disk is served without a network call, so
+the demo (and the test suite) runs offline and byte-identically on every
+run.
+
+"Already on disk" is bounded by `max_age`, which the caller supplies.
+Unbounded, as this was originally, a nightly crawl re-reads yesterday's
+bytes forever and the delta can never fire; `Fetcher` therefore passes
+`Settings.cache_max_age` (12 hours by default) and `nimbus demo
+--offline` sets it to `None` so its seeded fixtures never expire
+(ADR-0004).
 """
 
 from __future__ import annotations
@@ -41,11 +49,27 @@ class HtmlCache:
     def _path_for(self, url: str) -> Path:
         return self.root / f"{self.key(url)}.json"
 
-    def get(self, url: str) -> CachedPage | None:
+    def get(self, url: str, *, max_age: float | None = None) -> CachedPage | None:
+        """The cached page for `url`, or `None` if there is none.
+
+        `max_age` is a staleness bound in seconds: an entry fetched longer
+        ago than that is reported as a miss, so the caller re-fetches.
+        `None` -- the default -- means entries never expire, which is what
+        the offline demo and the test suite depend on (ADR-0004: the demo
+        must be byte-identical on every run, and that is only true if a
+        seeded entry is still served tomorrow). The nightly crawl passes
+        `Settings.cache_max_age` instead: without a bound, a delta run
+        would compare yesterday's bytes against themselves and could never
+        detect a change.
+        """
         path = self._path_for(url)
         if not path.exists():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
+        if max_age is not None:
+            fetched_at = datetime.fromisoformat(data["fetched_at"])
+            if (datetime.now(UTC) - fetched_at).total_seconds() > max_age:
+                return None
         return CachedPage(
             url=data["url"],
             status=data["status"],

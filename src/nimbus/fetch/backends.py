@@ -9,9 +9,12 @@ this proof of concept.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import httpx
+
+if TYPE_CHECKING:
+    from nimbus.config import Settings
 
 
 @dataclass
@@ -66,3 +69,18 @@ class CrawlbaseBackend:
         return RawResponse(
             status=response.status_code, content_type=content_type, body=response.text
         )
+
+
+def build_backend(settings: Settings) -> FetchBackend:
+    """The backend `settings.fetch_backend` names.
+
+    One function rather than an `if` repeated at each entry point: the
+    switch used to be read only by `mcp_server.main()`, so `cli.crawl` and
+    `demo.run_live_demo` hardcoded `HttpxBackend` and `FETCH_BACKEND=
+    crawlbase` silently did nothing on the crawl path -- while ADR-0005
+    and `.env.example` both presented it as the live switch.
+    """
+    if settings.fetch_backend == "crawlbase":
+        token = settings.crawlbase_token.get_secret_value() if settings.crawlbase_token else ""
+        return CrawlbaseBackend(token=token, user_agent=settings.user_agent)
+    return HttpxBackend(user_agent=settings.user_agent)

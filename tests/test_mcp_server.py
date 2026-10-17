@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from nimbus.config import Settings
+from nimbus.fetch.backends import RawResponse
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.mcp_server import build_tools
@@ -278,3 +279,85 @@ async def test_get_robots_reports_policy_fields(get_robots):
     assert out["crawl_delay"] == 2
     assert out["sitemaps"] == ["https://www.henstockps.co.uk/sitemap.xml"]
     assert out["fetchable"] is True
+
+
+# --------------------------------------------------------------------------
+# B2: `Fetcher.get()` raises FetchStatusError on a non-2xx response now, and
+# both of these tools caught only RobotsDisallowed. The 404 path is not
+# exotic -- `get_sitemap` *guesses* https://{domain}/sitemap.xml whenever
+# robots.txt declares none, which is this repo's own documented
+# "no sitemap at all (the jaksandco case)". Previously the 404 body failed
+# XML parsing and fell through; now it would abort the discovery agent's
+# tool call outright.
+# --------------------------------------------------------------------------
+
+
+class _NotFoundBackend:
+    def __init__(self, status: int = 404) -> None:
+        self.status = status
+
+    async def fetch(self, url: str, *, timeout: float):
+        return RawResponse(status=self.status, content_type="text/html", body="<html>gone</html>")
+
+
+def _tools_with_missing_sitemap(tmp_path, settings):
+    cache = HtmlCache(root=tmp_path)
+    cache.put(
+        "https://www.nosuchsitemap.co.uk/robots.txt",
+        200,
+        "text/plain",
+        "User-agent: *\nAllow: /\n",
+    )
+    fetcher = Fetcher(settings, cache, _NotFoundBackend())
+    return build_tools(fetcher)
+
+
+async def test_get_sitemap_survives_a_404_guessed_sitemap(tmp_path, settings):
+    """No sitemap declared and none at the guessed location: the tool must
+    return an empty list so the agent can fall back to a listing index,
+    not raise."""
+    tools = _tools_with_missing_sitemap(tmp_path, settings)
+
+    result = await tools["get_sitemap"]("www.nosuchsitemap.co.uk")
+
+    assert result["urls"] == []
+    assert result["url_count"] == 0
+
+
+async def test_get_sitemap_survives_a_404_child_sitemap(tmp_path, settings):
+    """An index whose children 404 must yield whatever did parse, not
+    abort the whole call."""
+    cache = HtmlCache(root=tmp_path)
+    cache.put(
+        "https://www.partial.co.uk/robots.txt",
+        200,
+        "text/plain",
+        "User-agent: *\nAllow: /\nSitemap: https://www.partial.co.uk/sitemap-index.xml\n",
+    )
+    cache.put(
+        "https://www.partial.co.uk/sitemap-index.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap><loc>https://www.partial.co.uk/sitemap-gone.xml</loc></sitemap>
+        </sitemapindex>""",
+    )
+    tools = build_tools(Fetcher(settings, cache, _NotFoundBackend(500)))
+
+    result = await tools["get_sitemap"]("www.partial.co.uk")
+
+    assert result["urls"] == []
+
+
+async def test_fetch_page_reports_a_non_2xx_as_a_structured_error(tmp_path, settings):
+    """A dead listing URL must come back as data the agent can reason
+    about, the same way a disallowed one does -- never as an exception
+    that ends the tool call."""
+    tools = _tools_with_missing_sitemap(tmp_path, settings)
+
+    result = await tools["fetch_page"]("https://www.nosuchsitemap.co.uk/property/1")
+
+    assert result["error"] == "http_error"
+    assert result["status"] == 404
+    assert "content" not in result

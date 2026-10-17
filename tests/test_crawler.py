@@ -371,8 +371,44 @@ async def test_crawl_site_respects_limit(cache, fetcher):
 
     assert len(outcome.records) == 3
     assert outcome.candidates == 4
-    assert outcome.selected == 3
+    # `selected` is what the recipe implied, *before* the limit -- the
+    # truncated figure goes in `attempted`. Reporting the truncated count
+    # as `selected` made every limited run look complete to
+    # `should_allow_mass_withdrawal`.
+    assert outcome.selected == 4
+    assert outcome.attempted == 3
     assert outcome.fetched == 3
+    assert outcome.limit_applied is True
+
+
+async def test_crawl_site_does_not_flag_a_limit_that_never_bit(cache, fetcher):
+    """`--limit 50` on a site with 1 listing is not a partial run, so it
+    must not permanently disqualify the domain from mass withdrawal."""
+    cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://www.ashworthholme.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.ashworthholme.co.uk/property/1</loc></url>
+        </urlset>""",
+    )
+    cache.put(
+        "https://www.ashworthholme.co.uk/property/1", 200, "text/html", "<html>listing 1</html>"
+    )
+    recipe = make_recipe(
+        domain="ashworthholme.co.uk",
+        sitemap_urls=["https://www.ashworthholme.co.uk/sitemap.xml"],
+        listing_index_urls=[],
+        listing_url_patterns=["/property/*"],
+    )
+
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0, limit=50)
+
+    assert outcome.selected == 1
+    assert outcome.attempted == 1
+    assert outcome.limit_applied is False
 
 
 async def test_crawl_site_skips_robots_disallowed_without_failing_the_run(cache, fetcher):
@@ -634,3 +670,50 @@ async def test_robots_disallowed_is_importable_for_catching(fetcher):
     # sanity: the exception type the module must catch is importable from
     # the fetch layer, not reimplemented locally.
     assert issubclass(RobotsDisallowed, Exception)
+
+
+async def test_crawl_delay_applies_to_candidate_collection_too(cache, fetcher):
+    """`collect_candidate_urls` fans out across a sitemap index's children
+    with no delay at all, so every run opened with an unpaced burst
+    against the sites most likely to have declared a Crawl-delay. One
+    sitemap index + two child sitemaps + two listing pages = five fetches
+    and so four gaps, not the two the listing loop used to produce."""
+    cache.put("https://jaksandco.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://jaksandco.co.uk/sitemap-index.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap><loc>https://jaksandco.co.uk/sitemap-a.xml</loc></sitemap>
+          <sitemap><loc>https://jaksandco.co.uk/sitemap-b.xml</loc></sitemap>
+        </sitemapindex>""",
+    )
+    for name, n in (("a", 1), ("b", 2)):
+        cache.put(
+            f"https://jaksandco.co.uk/sitemap-{name}.xml",
+            200,
+            "application/xml",
+            f"""<?xml version="1.0"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://jaksandco.co.uk/property/{n}</loc></url>
+            </urlset>""",
+        )
+        cache.put(f"https://jaksandco.co.uk/property/{n}", 200, "text/html", f"<html>{n}</html>")
+
+    recipe = make_recipe(
+        domain="jaksandco.co.uk",
+        sitemap_urls=["https://jaksandco.co.uk/sitemap-index.xml"],
+        listing_index_urls=[],
+        listing_url_patterns=["/property/*"],
+    )
+
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=1.5, sleep=fake_sleep)
+
+    assert outcome.fetched == 2
+    assert delays == [1.5, 1.5, 1.5, 1.5]

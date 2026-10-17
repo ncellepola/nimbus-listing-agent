@@ -33,7 +33,13 @@ import logging
 import sqlite3
 
 from nimbus import storage
-from nimbus.models import DeltaReport, Listing
+from nimbus.models import (
+    DELIBERATE_EXCLUSIONS,
+    CrawlOutcome,
+    DeltaReport,
+    ExtractionResult,
+    Listing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,99 @@ logger = logging.getLogger(__name__)
 # failed crawl too, not just the fully empty one. A site does not usually
 # sell off a majority of its stock in a single night.
 _MASS_WITHDRAWAL_FRACTION = 0.5
+
+# How much of a crawl's own *selected* URL set must actually have been
+# fetched before its outcome is trusted to authorise a mass withdrawal.
+# Deliberately not "outcome.fetched > 0": a crawl that selected 1075 URLs
+# and fetched exactly one of them satisfies "fetched > 0" trivially, and
+# that one success is not evidence the other 1074 are gone -- it is
+# evidence the crawl mostly failed, which is precisely the shape
+# _MASS_WITHDRAWAL_FRACTION above exists to catch. Callers at the
+# orchestration layer (nimbus.cli, nimbus.demo) must derive
+# `apply_delta`'s `allow_mass_withdrawal` from `should_allow_mass_withdrawal`,
+# not from any bare truthiness check on `outcome.fetched`.
+MASS_WITHDRAWAL_FETCH_RATIO = 0.9
+
+# How much of what the run could *judge* must actually have yielded a
+# Listing. Fetching is not the signal that drives withdrawal -- extraction
+# is: `apply_delta` compares stored URLs against the `listings` it is
+# handed, and a site redesign leaves every URL resolving perfectly while
+# breaking every extraction. That run scores a fetch ratio of exactly 1.0
+# and would, on the fetch ratio alone, be authorised to withdraw the whole
+# domain. It is the one scenario the heal subsystem exists for, and the
+# guard did not fire in it.
+#
+# 0.5 rather than the fetch path's 0.9 because the two failure modes are
+# shaped differently. A fetch either worked or did not; extraction has a
+# legitimate tail -- a land or commercial page with no parseable heading,
+# a listing whose markup is genuinely unusual -- that does not mean the
+# recipe is broken. What this must catch is the collapse towards zero, not
+# a few percent of noise. Deliberate exclusions (Sold STC, To Let) leave
+# the denominator entirely, for the same reason `site_health` drops them:
+# they are correct outcomes, and on this repo's own ashworthholme.co.uk
+# fixtures they are two thirds of every page crawled.
+MASS_WITHDRAWAL_EXTRACTION_RATIO = 0.5
+
+
+def should_allow_mass_withdrawal(
+    outcome: CrawlOutcome,
+    results: list[ExtractionResult],
+    *,
+    min_fetch_ratio: float = MASS_WITHDRAWAL_FETCH_RATIO,
+    min_extraction_ratio: float = MASS_WITHDRAWAL_EXTRACTION_RATIO,
+) -> bool:
+    """Whether this run is trustworthy enough to authorise withdrawing
+    more than half of a domain's stored listings.
+
+    `results` is every `ExtractionResult` the run produced, in any order,
+    and is required rather than optional on purpose: the caller cannot
+    forget to supply the signal that actually drives withdrawal.
+
+    Four ways to fail, each a distinct real shape:
+
+    - a `--limit` actually truncated the selected set (`limit_applied`).
+      Such a run deliberately looks at a slice of the site; the URLs it
+      never opened are not absent, they are unexamined. A limit that did
+      not bite -- `--limit 50` against a one-listing site -- leaves
+      `limit_applied` False and is treated as the complete run it is.
+    - nothing was selected at all (`outcome.selected == 0`): no candidate
+      matched the recipe's patterns, which is recipe drift, not a quiet
+      night.
+    - too little of what the recipe implied was actually fetched. A crawl
+      that selected 1075 URLs and fetched one of them is evidence the
+      crawl failed, not that 1074 listings sold overnight.
+    - too little of what *was* fetched survived extraction. This is the
+      redesign case: URLs intact, markup changed, every extraction
+      failing. See `MASS_WITHDRAWAL_EXTRACTION_RATIO` above.
+    """
+    if outcome.limit_applied:
+        return False
+    if outcome.selected == 0:
+        return False
+    if outcome.fetched < outcome.selected * min_fetch_ratio:
+        return False
+
+    # The denominator is `outcome.fetched`, not `len(results)`, and that
+    # distinction is the whole guard. A result the caller never handed
+    # over -- an `ExtractionError` it caught and `continue`d past, which
+    # is what an Anthropic 429 storm or a revoked key produces by the
+    # hundred -- must shrink the numerator and leave the denominator
+    # alone. Counting only what came back meant 99 failures out of 100
+    # pages left a single success over a denominator of one: a perfect
+    # score, authorising the withdrawal of the entire domain. Deriving
+    # the denominator from the crawl instead makes the guard independent
+    # of whether the caller remembered to report its failures.
+    deliberate = sum(1 for r in results if r.rejection_reason in DELIBERATE_EXCLUSIONS)
+    judgeable = max(outcome.fetched - deliberate, 0)
+    if judgeable == 0:
+        # Either nothing was fetched, or everything fetched was a correct
+        # non-sale exclusion. The latter says the recipe is fine, but it
+        # is no evidence about the stored listings either, so neither
+        # authorises removing them.
+        return False
+
+    extracted = sum(1 for r in results if r.listing is not None)
+    return extracted >= judgeable * min_extraction_ratio
 
 
 def apply_delta(
@@ -61,8 +160,13 @@ def apply_delta(
     - A `source_url` seen before with the same price is `unchanged`.
     - A previously stored `source_url` for `domain` that is absent from
       `listings` entirely is `withdrawn` — the listing used to be live and
-      is not any more. Its stored row is left as-is (not deleted), so its
-      history up to withdrawal is preserved.
+      is not any more. Its row is stamped with `withdrawn_at` rather than
+      deleted, so its history up to withdrawal is preserved, it is not
+      re-reported as newly withdrawn every subsequent night, and it drops
+      out of the denominator of the mass-withdrawal fraction (left in, a
+      domain whose cumulative withdrawals passed half its rows would latch
+      the guard permanently shut). A URL that reappears in a later run has
+      the stamp cleared by `storage.upsert_listing`.
 
     If the listings that would be withdrawn are more than half of what
     was previously stored for `domain` (and at least one listing was
@@ -130,6 +234,23 @@ def apply_delta(
         )
         report.withdrawal_suppressed = True
     else:
+        if is_mass_withdrawal:
+            # The override was granted and a mass withdrawal is about to
+            # actually happen -- the one write in this module consequential
+            # enough that it must never go unlogged just because the caller
+            # opted in. Separate from the ERROR branch above: that one is a
+            # refusal, this one is a deliberate, approved action, logged so
+            # it leaves the same audit trail an operator would expect from a
+            # system whose selling point includes one.
+            logger.warning(
+                "apply_delta(%s): withdrawing %d/%d previously stored listing(s) in one run -- "
+                "more than half, proceeding because allow_mass_withdrawal=True was passed "
+                "explicitly. This should be a deliberate, reviewed decision, not a routine one.",
+                domain,
+                len(proposed_withdrawn),
+                stored_count,
+            )
+        storage.mark_withdrawn(conn, proposed_withdrawn)
         report.withdrawn = proposed_withdrawn
 
     return report

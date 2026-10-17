@@ -22,13 +22,13 @@ are where a naive implementation breaks:
 2. `extract_listing` cross-checks the model's reported price against the
    page content actually reachable from the recipe's own `field_hints`
    price location (or a status-bearing `h1`/`h2`/`h3`), never against the
-   page as a whole (pre-flight ruling R26). `ashworthholme.co.uk`'s real
+   page as a whole. `ashworthholme.co.uk`'s real
    fixtures carry 48-49 unrelated pound amounts from a price-filter
    dropdown (£350 to £10,000,000); a bare substring-in-page check passes
    all of them, including the wrong ones, so the search is scoped to where
    the recipe says the real price actually lives.
 
-A page that offers no such location at all (ruling R27 — `bentleyhurst.co.uk`'s
+A page that offers no such location at all (`bentleyhurst.co.uk`'s
 fixtures are client-rendered Gatsby shells with zero headings and zero
 pound signs in the fetched HTML) is rejected before the model is even
 called: there is nothing to corroborate against, so no amount of model
@@ -60,7 +60,15 @@ from pydantic import ValidationError
 
 from nimbus import storage
 from nimbus.htmltext import html_to_markdown
-from nimbus.models import CrawlRecord, ExtractionResult, Listing, PropertyType, SiteRecipe, Tenure
+from nimbus.models import (
+    CrawlRecord,
+    ExtractionResult,
+    Listing,
+    PropertyType,
+    RejectionReason,
+    SiteRecipe,
+    Tenure,
+)
 
 
 class ExtractionError(Exception):
@@ -122,7 +130,7 @@ _PRICE_WIDGET_SELECTOR = "[class*='price'], [id*='price']"
 # literally contains "price" too, but it decorates the whole page's <body>
 # or a top-level wrapper, and matching it would widen the corroboration
 # region back to nearly the entire page: exactly what this function exists
-# to avoid (ruling R26).
+# to avoid: corroboration must stay scoped to where the price lives.
 _MAX_PRICE_WIDGET_CHARS = 300
 
 # Cap on how much markdown page text is sent to the model. The six real
@@ -140,6 +148,33 @@ _QUALIFIER_KEYWORDS: list[tuple[str, str]] = [
 _RENTAL_MARKERS = ("pcm", "per calendar month", "per month", "/pm", "pw")
 _LETTING_STATUS_MARKERS = ("to let", "let agreed", "to rent")
 _SOLD_MARKERS = ("sold stc", "sold subject to contract", "sold")
+
+# Markers the *pre-model* filter acts on: a strict subset of the three
+# tuples above, carrying the unambiguous multi-word status phrases and
+# deliberately omitting `_SOLD_MARKERS`' bare "sold" and
+# `_RENTAL_MARKERS`' two-character "pw"/"/pm", which are too short to
+# match safely against anything wider than one short string.
+#
+# A subset of the *markers* is not the same as a subset of the *rule*, and
+# an earlier version of this comment claimed otherwise. `is_residential_sale`
+# runs against the model's narrow `price_raw`; this filter runs against a
+# region of the page, so a matching marker anywhere in that region decides
+# the page. That is only sound if the region is one the recipe itself says
+# carries this listing's price and status -- hence `_status_text` below,
+# not `_corroboration_text`. Scanning every heading (which this did, and
+# which the three cached fixture sites happened not to punish) means a UK
+# agent with a lettings arm and "To Let" in its global navigation has its
+# entire inventory rejected, for free and without a model call to notice
+# it by.
+_UNAMBIGUOUS_NON_SALE_MARKERS = (
+    "sold stc",
+    "sold subject to contract",
+    "to let",
+    "let agreed",
+    "to rent",
+    "pcm",
+    "per calendar month",
+)
 
 _SCORED_FIELDS = (
     "address",
@@ -242,6 +277,30 @@ def is_residential_sale(raw_text: str, listing: Listing) -> bool:
     return True
 
 
+def non_sale_marker(status_text: str) -> str | None:
+    """The first unambiguous non-sale status marker in `status_text`, or
+    `None`. Pure, no LLM, and cheap enough to run before the model call.
+
+    `status_text` must be a region the *recipe* says carries this
+    listing's own price and status (`_status_text`), never the whole page
+    and never every heading on it: a marker anywhere in the region
+    rejects the page, so a "Properties To Let" item in a site-wide
+    navigation would otherwise reject that site's entire inventory.
+
+    Measured on this repo's own cached pages, against the narrow region:
+    12 of ashworthholme.co.uk's 18 listing pages (11 Sold STC, 1 To Let)
+    carry one of these markers, with no false positive on any of the 6
+    live For Sale pages -- two thirds of that site's extraction spend,
+    previously paid to have the model tell us what the status line
+    already said.
+    """
+    lowered = status_text.lower()
+    for marker in _UNAMBIGUOUS_NON_SALE_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
 # --------------------------------------------------------------------------
 # HTML -> page text / corroboration region. BeautifulSoup decodes HTML
 # entities while parsing (so `&pound;` becomes `£` in every `.get_text()`
@@ -256,7 +315,7 @@ def _page_markdown(html: str) -> str:
 def _corroboration_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
     """Text from the recipe's own price field-hint location, every
     top-level heading, and any element that names itself as a price
-    widget by class/id. Never the whole page (pre-flight ruling R26) — the
+    widget by class/id. Never the whole page — the
     whole page is exactly where ashworthholme.co.uk's 48-49 unrelated price
     values live.
 
@@ -291,6 +350,41 @@ def _corroboration_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
     # `<div class="price">`. The length cap excludes a WordPress-style
     # body/container class that also contains the substring "price"
     # (e.g. "price_qualifier-guide-price") but wraps the whole page.
+    for element in cleaned.select(_PRICE_WIDGET_SELECTOR):
+        text = element.get_text(" ", strip=True)
+        if text and len(text) <= _MAX_PRICE_WIDGET_CHARS:
+            parts.append(text)
+
+    return "\n".join(part for part in parts if part)
+
+
+def _status_text(soup: BeautifulSoup, recipe: SiteRecipe) -> str:
+    """The narrow region the *pre-model* non-sale filter is allowed to
+    judge: the recipe's own price field-hint match, plus any element that
+    names itself a price widget by class/id. No general heading scan.
+
+    Deliberately narrower than `_corroboration_text`, which may be wide
+    because it only ever *corroborates* a value the model already
+    produced -- a false match there costs nothing. A false match here
+    rejects a live listing outright and never calls the model, so this
+    region is restricted to the places the recipe asserts this listing's
+    own price and status live. A page offering no such place simply does
+    not get pre-filtered, and goes to the model as before.
+    """
+    cleaned = BeautifulSoup(str(soup), "html.parser")
+    for tag in cleaned(_FORM_CONTROL_TAGS):
+        tag.decompose()
+
+    parts: list[str] = []
+
+    price_hint = next((h for h in recipe.field_hints if h.field == "price"), None)
+    if price_hint is not None and price_hint.css_selector:
+        try:
+            matched = cleaned.select(price_hint.css_selector)
+        except Exception:
+            matched = []
+        parts.extend(el.get_text(" ", strip=True) for el in matched)
+
     for element in cleaned.select(_PRICE_WIDGET_SELECTOR):
         text = element.get_text(" ", strip=True)
         if text and len(text) <= _MAX_PRICE_WIDGET_CHARS:
@@ -386,14 +480,37 @@ def _field_confidence(listing: Listing) -> dict[str, float]:
     return scores
 
 
-def _empty_result(issue: str) -> ExtractionResult:
+def _empty_result(issue: str, reason: RejectionReason) -> ExtractionResult:
     return ExtractionResult(
         listing=None,
         field_confidence={},
         overall_confidence=0.0,
         needs_review=True,
         issues=[issue],
+        rejection_reason=reason,
     )
+
+
+def unchanged_since_last_run(conn: sqlite3.Connection, record: CrawlRecord) -> Listing | None:
+    """The stored `Listing` for `record.url` when this run fetched
+    byte-identical HTML, or `None` when there is nothing stored or the
+    page has changed.
+
+    This is what makes "no LLM call for a page that did not change" true
+    rather than merely intended. `content_hash` was computed by the
+    crawler, written to both `listings` and `extraction_audit`, and
+    documented in `models.CrawlRecord` as the skip that avoids
+    re-extraction -- and never read, so the nightly run paid for one model
+    call per listing page per night whether or not a single byte had
+    moved.
+
+    The caller must still pass the returned `Listing` through to
+    `apply_delta`: "we did not need to re-read it" is not "it is gone".
+    """
+    stored = storage.get_listing(conn, record.url)
+    if stored is not None and stored.content_hash == record.content_hash:
+        return stored
+    return None
 
 
 async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) -> ExtractionResult:
@@ -405,13 +522,15 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
     failed schema validation, failed the residential-sale check, or
     reported a price that could not be corroborated against the page
     (that field is dropped, not trusted) — see the module docstring for the
-    guard layers and ruling R26/R27.
+    guard layers: corroboration is scoped to where the recipe says the
+    price lives, and a page with nothing to corroborate against is
+    rejected before any call is paid for.
     """
     soup = BeautifulSoup(record.html, "html.parser")
     corroboration_text = _corroboration_text(soup, recipe)
 
     if not corroboration_text.strip():
-        # Ruling R27: nothing on this page (no field-hint match, no
+        # Nothing on this page (no field-hint match, no
         # heading at all) to corroborate anything against. Reject before
         # spending a model call that could never be validated either way —
         # bentleyhurst.co.uk's real fixtures are exactly this: a
@@ -420,7 +539,20 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
         return _empty_result(
             "page has no heading or price-hint content to corroborate against; it is "
             "likely a client-rendered page with no listing data in the fetched HTML "
-            "(or the recipe's field hints no longer match this page)"
+            "(or the recipe's field hints no longer match this page)",
+            RejectionReason.NO_CORROBORATION_REGION,
+        )
+
+    # Deterministic pre-filter, before the one paid call. The status
+    # heading is already in `corroboration_text`; if it says Sold STC or
+    # To Let, `is_residential_sale` is going to reject this page in a
+    # moment anyway, so there is nothing to buy by asking the model first.
+    marker = non_sale_marker(_status_text(soup, recipe))
+    if marker is not None:
+        return _empty_result(
+            f"page is not an open residential sale listing: its status text carries "
+            f"{marker!r}, so it was rejected before any model call was made",
+            RejectionReason.NOT_RESIDENTIAL_SALE,
         )
 
     page_text = _page_markdown(record.html)
@@ -446,7 +578,9 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
         block for block in response.content if getattr(block, "type", None) == "tool_use"
     ]
     if not tool_blocks:
-        return _empty_result("model did not return structured tool output")
+        return _empty_result(
+            "model did not return structured tool output", RejectionReason.NO_TOOL_OUTPUT
+        )
 
     payload = dict(tool_blocks[0].input)
     price_raw = str(payload.pop("price_raw", "") or "")
@@ -472,12 +606,16 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
             content_hash=record.content_hash,
         )
     except ValidationError as exc:
-        return _empty_result(f"model output failed Listing schema validation: {exc}")
+        return _empty_result(
+            f"model output failed Listing schema validation: {exc}",
+            RejectionReason.SCHEMA_INVALID,
+        )
 
     if not is_residential_sale(price_raw, listing):
         return _empty_result(
             f"page is not an open residential sale listing (price/status text {price_raw!r} "
-            "carries a rental, letting, or sold marker)"
+            "carries a rental, letting, or sold marker)",
+            RejectionReason.NOT_RESIDENTIAL_SALE,
         )
 
     issues: list[str] = []
@@ -508,7 +646,7 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
 
 
 # --------------------------------------------------------------------------
-# Audit trail (pre-flight rulings R3/R4): this module owns persistence of
+# Audit trail: this module owns persistence of
 # every extraction attempt, successful or not. Task 7 calls only
 # `record_extraction`.
 # --------------------------------------------------------------------------
@@ -539,6 +677,13 @@ def audit_row(
         "cost_usd": cost_usd,
         "schema_valid": result.listing is not None,
         "needs_review": result.needs_review,
+        # Which rejection path was taken, or NULL when a Listing was
+        # produced. `nimbus.heal.site_health` reads this to drop
+        # deliberate exclusions from its denominator -- without it, a
+        # site whose stock is mostly Sold STC reads as a collapsed recipe.
+        "rejection_reason": (
+            result.rejection_reason.value if result.rejection_reason is not None else None
+        ),
     }
 
 
@@ -554,8 +699,9 @@ def record_extraction(
     cost_usd: float,
 ) -> None:
     """Compose `audit_row` and persist it via `storage.insert_audit`. The
-    only way an extraction attempt reaches the `extraction_audit` table —
-    Task 7 must call this and nothing lower-level (pre-flight ruling R4)."""
+    only way an extraction attempt reaches the `extraction_audit` table:
+    callers use this and never `storage.insert_audit` directly, so every
+    attempt is recorded with the same columns in the same shape."""
     row = audit_row(
         record,
         recipe,
