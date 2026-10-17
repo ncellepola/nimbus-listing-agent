@@ -29,6 +29,14 @@ anything — a prior live fetch, or a test/demo seeding it directly from a
 fixture file — is indistinguishable to every piece of real pipeline code
 downstream of `Fetcher.get()`.
 
+One later correction, because the two uses pull in opposite directions: a
+cache with no expiry is what the demo needs and is a defect in
+production, where it would make every nightly crawl re-read yesterday's
+bytes and the delta could never fire. `Settings.cache_max_age` bounds
+entry age (12 hours by default) and the offline demo sets it to `None`.
+The demo's reproducibility is therefore an explicit configuration choice
+rather than a property of the cache itself.
+
 ## Decision
 
 `nimbus demo --offline` (Task 7, `src/nimbus/demo.py`) pre-seeds a throwaway

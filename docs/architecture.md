@@ -89,6 +89,18 @@ are commodity problems and are bought.
 `fetch/robots.py` parses robots.txt including `Crawl-delay` and the modern
 `Content-Signal`/named-AI-agent conventions, resolved per user-agent.
 
+It also **fails closed**, which the first version of this did not and
+which matters more than the parsing does. RFC 9309 separates a robots.txt
+that is *unavailable* (§2.3.1.3 — a 404: the site publishes none, so
+everything is permitted) from one that is *unreachable* (§2.3.1.4 — a
+transport error or a 5xx: the crawler "MUST assume complete disallow").
+`robots_for` originally returned allow-all for every one of those cases,
+cached whatever the backend returned including a 503 body, and never
+expired it — so a single transient failure flipped a domain to allow-all
+permanently, with no log and no way to notice. Now the branches are
+split, each fallback logs a WARNING naming the domain and the branch, and
+no non-2xx response is ever cached, on this path or the listing path.
+
 ### `mcp_server.py` — the discovery agent's only route to the web
 
 Three tools, over local stdio MCP, and nothing else: `get_robots`,
@@ -146,9 +158,15 @@ narrows that down by `listing_url_patterns`, and each selected URL is
 fetched through the same `Fetcher.get()` the agent uses, skipping (not
 aborting the run for) a single `RobotsDisallowed` or `FetchError`. It
 returns a `CrawlOutcome` carrying the counts an orchestrator needs for a
-truthful log line and `crawl_runs` row — candidates/selected/fetched/
-skipped-by-reason — because those counts are gone once a skipped URL is
-discarded and must not require re-crawling to recover.
+truthful log line and `crawl_runs` row — candidates / selected (before any
+`--limit`) / attempted / fetched / skipped-by-reason — because those
+counts are gone once a skipped URL is discarded and must not require
+re-crawling to recover. `cli.crawl` writes the `crawl_runs` row from them.
+
+Every fetch the run makes, candidate collection included, is spaced by
+the same `Pacer`. Pacing only the listing loop (as this originally did)
+meant each run opened with an unpaced burst across a sitemap index's
+children, against the sites most likely to have declared a `Crawl-delay`.
 
 `crawl_delay` is deliberately **not** read from the recipe. It is resolved
 fresh, at the orchestration call site (`cli.py`'s `crawl` command and

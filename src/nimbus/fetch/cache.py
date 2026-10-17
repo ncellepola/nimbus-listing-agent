@@ -1,7 +1,15 @@
 """Content-addressed disk cache for fetched pages.
 
-Cache-first: a URL already on disk is never re-fetched, so the demo (and
-the test suite) runs offline and byte-identically on every run.
+Cache-first: a URL already on disk is served without a network call, so
+the demo (and the test suite) runs offline and byte-identically on every
+run.
+
+"Already on disk" is bounded by `max_age`, which the caller supplies.
+Unbounded, as this was originally, a nightly crawl re-reads yesterday's
+bytes forever and the delta can never fire; `Fetcher` therefore passes
+`Settings.cache_max_age` (12 hours by default) and `nimbus demo
+--offline` sets it to `None` so its seeded fixtures never expire
+(ADR-0004).
 """
 
 from __future__ import annotations
