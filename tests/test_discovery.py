@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from conftest import make_recipe
 
+import nimbus.discovery as discovery
 from nimbus.config import Settings
 from nimbus.discovery import (
     DiscoveryError,
@@ -96,6 +97,61 @@ async def test_discover_site_requires_api_key():
     settings = Settings(anthropic_api_key="", cache_dir=Path("x"), db_path=Path("y"))
 
     with pytest.raises(DiscoveryError, match="ANTHROPIC_API_KEY"):
+        await discover_site("ashworthholme.co.uk", settings=settings)
+
+
+def _settings_with_key(tmp_path) -> Settings:
+    return Settings(
+        anthropic_api_key="sk-ant-test-not-real",
+        cache_dir=tmp_path / "cache",
+        db_path=tmp_path / "nimbus.db",
+    )
+
+
+def _unsound_recipe_json() -> str:
+    """Parses fine and is schema-valid, but validate_recipe rejects it: no
+    sitemap and no listing index URLs at all (Review Focus 1)."""
+    payload = json.loads(VALID)
+    payload["sitemap_urls"] = []
+    payload["listing_index_urls"] = []
+    return json.dumps(payload)
+
+
+def _fake_run_agent(outputs: list[str]):
+    """A stand-in for `_run_agent` that returns the next canned output on
+    each call, so `discover_site`'s retry logic can be exercised without
+    ever starting a real agent query or touching the network."""
+
+    async def fake(prompt: str, options) -> str:
+        return outputs.pop(0)
+
+    return fake
+
+
+async def test_discover_site_retries_once_after_parse_failure_then_succeeds(monkeypatch, tmp_path):
+    settings = _settings_with_key(tmp_path)
+    monkeypatch.setattr(discovery, "_run_agent", _fake_run_agent([MALFORMED, VALID]))
+
+    r = await discover_site("ashworthholme.co.uk", settings=settings)
+
+    assert r.domain == "ashworthholme.co.uk"
+    assert r.listing_url_patterns
+
+
+async def test_discover_site_raises_after_two_validation_failures(monkeypatch, tmp_path):
+    settings = _settings_with_key(tmp_path)
+    unsound = _unsound_recipe_json()
+    monkeypatch.setattr(discovery, "_run_agent", _fake_run_agent([unsound, unsound]))
+
+    with pytest.raises(DiscoveryError, match="validation twice"):
+        await discover_site("ashworthholme.co.uk", settings=settings)
+
+
+async def test_discover_site_raises_after_two_parse_failures(monkeypatch, tmp_path):
+    settings = _settings_with_key(tmp_path)
+    monkeypatch.setattr(discovery, "_run_agent", _fake_run_agent([MALFORMED, MALFORMED]))
+
+    with pytest.raises(DiscoveryError, match="failed twice"):
         await discover_site("ashworthholme.co.uk", settings=settings)
 
 

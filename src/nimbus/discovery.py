@@ -159,7 +159,7 @@ def _render_retry_prompt(domain: str, problems: list[str]) -> str:
     )
 
 
-def _mcp_server_options(settings: Settings, max_turns: int):
+def _mcp_server_options(settings: Settings, max_turns: int, api_key: str):
     # Imported lazily so that importing nimbus.discovery (and running the
     # pure parse/validate tests) never requires claude_agent_sdk's CLI
     # subprocess machinery to be importable in a context that doesn't need it.
@@ -173,8 +173,30 @@ def _mcp_server_options(settings: Settings, max_turns: int):
                 "args": ["-m", "nimbus.mcp_server"],
             }
         },
+        # `tools` governs the CLI's *built-in* tool set (Bash, Read, Write,
+        # WebFetch, WebSearch, ...) and is entirely separate from
+        # `mcp_servers` (confirmed against the installed CLI's own --help
+        # and claude_agent_sdk/types.py's ClaudeAgentOptions.tools
+        # docstring: "[] (empty list) — Disable all built-in tools", scoped
+        # to "the built-in set"). Setting it to [] is what actually makes
+        # the three MCP tools the agent's *only* route to the web — the
+        # robots gate inside fetch_page is the enforcement point, and this
+        # is what makes it unbypassable rather than merely unprompted.
+        tools=[],
+        # `allowed_tools` only controls auto-approval (no prompting) for
+        # the tools that do exist; with `tools=[]` the three MCP tools are
+        # the only tools left to approve.
         allowed_tools=[f"mcp__{_MCP_SERVER_NAME}__{name}" for name in _MCP_TOOL_NAMES],
         max_turns=max_turns,
+        # `Settings()` reads `.env` relative to process cwd (pydantic-settings
+        # does not touch os.environ), so pinning cwd makes the whole chain
+        # work the same regardless of where discover_site was invoked from,
+        # not just when it happens to be the repo root already.
+        cwd=str(Path.cwd()),
+        # pydantic-settings parses `.env` into the model without mutating
+        # os.environ, so the key must be forwarded explicitly or the CLI
+        # subprocess (which does its own auth) never sees it.
+        env={"ANTHROPIC_API_KEY": api_key},
     )
 
 
@@ -220,7 +242,7 @@ async def discover_site(domain: str, *, settings: Settings, max_turns: int = 20)
     if not api_key:
         raise DiscoveryError(_MISSING_API_KEY_MESSAGE)
 
-    options = _mcp_server_options(settings, max_turns)
+    options = _mcp_server_options(settings, max_turns, api_key)
 
     prompt = _render_discovery_prompt(domain)
     text = await _run_agent(prompt, options)
