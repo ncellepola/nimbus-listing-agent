@@ -15,7 +15,7 @@ from nimbus.delta import (
     apply_delta,
     should_allow_mass_withdrawal,
 )
-from nimbus.models import CrawlOutcome
+from nimbus.models import CrawlOutcome, ExtractionResult, RejectionReason
 from nimbus.storage import init_db
 
 DOMAIN = "ashworthholme.co.uk"
@@ -194,7 +194,7 @@ def test_should_allow_mass_withdrawal_refuses_a_limited_run():
     # The truncated view -- what the outcome used to report -- clears the
     # ratio trivially, which is exactly why the ratio alone is not enough.
     assert limited.fetched >= limited.attempted * MASS_WITHDRAWAL_FETCH_RATIO
-    assert should_allow_mass_withdrawal(limited) is False
+    assert should_allow_mass_withdrawal(limited, _extracted(5)) is False
 
 
 def test_should_allow_mass_withdrawal_refuses_a_limit_that_covered_everything():
@@ -205,7 +205,8 @@ def test_should_allow_mass_withdrawal_refuses_a_limit_that_covered_everything():
     in its own right."""
     assert (
         should_allow_mass_withdrawal(
-            _outcome(selected=195, fetched=195, attempted=195, limit_applied=True)
+            _outcome(selected=195, fetched=195, attempted=195, limit_applied=True),
+            _extracted(195),
         )
         is False
     )
@@ -217,27 +218,27 @@ def test_should_allow_mass_withdrawal_refuses_a_mostly_failed_crawl():
     the exact "failed crawl looks like an overnight sell-off" shape
     apply_delta's own guard exists to catch, re-opened at the integration
     layer if the caller derives the flag from "something worked" alone."""
-    assert should_allow_mass_withdrawal(_outcome(selected=1075, fetched=1)) is False
+    assert should_allow_mass_withdrawal(_outcome(selected=1075, fetched=1), _extracted(1)) is False
 
 
 def test_should_allow_mass_withdrawal_permits_a_complete_crawl():
-    assert should_allow_mass_withdrawal(_outcome(selected=2, fetched=2)) is True
+    assert should_allow_mass_withdrawal(_outcome(selected=2, fetched=2), _extracted(2)) is True
 
 
 def test_should_allow_mass_withdrawal_permits_at_the_ratio_boundary():
     # 9/10 == the default 0.9 threshold exactly -- >=, not >.
-    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=9)) is True
+    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=9), _extracted(9)) is True
 
 
 def test_should_allow_mass_withdrawal_refuses_just_under_the_boundary():
-    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=8)) is False
+    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=8), _extracted(8)) is False
 
 
 def test_should_allow_mass_withdrawal_refuses_when_nothing_was_selected():
     # No candidates matched at all is itself a failure signal (recipe
     # drift), not evidence that it is safe to treat an empty run as a real
     # mass withdrawal.
-    assert should_allow_mass_withdrawal(_outcome(selected=0, fetched=0)) is False
+    assert should_allow_mass_withdrawal(_outcome(selected=0, fetched=0), []) is False
 
 
 def test_apply_delta_logs_when_mass_withdrawal_override_actually_proceeds(tmp_path, caplog):
@@ -255,3 +256,65 @@ def test_apply_delta_logs_when_mass_withdrawal_override_actually_proceeds(tmp_pa
     assert report.withdrawal_suppressed is False
     relevant = [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
     assert any(DOMAIN in r.message and "5" in r.message for r in relevant)
+
+
+# --------------------------------------------------------------------------
+# The guard measured fetch completeness, but withdrawal is driven by
+# *extraction*. A site redesign leaves URLs intact: the crawler fetches
+# 195/195, scores a ratio of 1.0, and is authorised -- then every
+# extraction fails, `listings == []`, and the entire domain is withdrawn.
+# The guard did not fire in the one scenario the heal subsystem exists for.
+# --------------------------------------------------------------------------
+
+
+def _extracted(n: int) -> list[ExtractionResult]:
+    return [
+        ExtractionResult(listing=make_listing(source_url=f"{SAME_URL}/{i}"), overall_confidence=1.0)
+        for i in range(n)
+    ]
+
+
+def _failed(n: int, reason: RejectionReason) -> list[ExtractionResult]:
+    return [
+        ExtractionResult(
+            listing=None, overall_confidence=0.0, needs_review=True, rejection_reason=reason
+        )
+        for _ in range(n)
+    ]
+
+
+def test_a_complete_crawl_with_zero_extractions_cannot_authorise_withdrawal():
+    """The redesign shape, composed from two of this repo's own passing
+    behaviours: every URL still resolves, so the fetch ratio is a perfect
+    1.0, and every extraction then fails against markup the recipe no
+    longer matches."""
+    outcome = _outcome(selected=195, fetched=195)
+
+    assert outcome.fetched >= outcome.selected * MASS_WITHDRAWAL_FETCH_RATIO
+    assert (
+        should_allow_mass_withdrawal(outcome, _failed(195, RejectionReason.NO_CORROBORATION_REGION))
+        is False
+    )
+
+
+def test_a_complete_crawl_whose_extractions_worked_still_authorises_withdrawal():
+    outcome = _outcome(selected=10, fetched=10)
+
+    assert should_allow_mass_withdrawal(outcome, _extracted(10)) is True
+
+
+def test_deliberate_non_sale_exclusions_do_not_count_against_the_extraction_yield():
+    """A site whose stock is mostly Sold STC is not a broken site. Those
+    pages are correctly excluded, so they leave the denominator entirely
+    -- the same reasoning site_health uses, for the same reason."""
+    outcome = _outcome(selected=18, fetched=18)
+    results = _extracted(6) + _failed(12, RejectionReason.NOT_RESIDENTIAL_SALE)
+
+    assert should_allow_mass_withdrawal(outcome, results) is True
+
+
+def test_a_crawl_whose_extraction_never_ran_cannot_authorise_withdrawal():
+    """Pages were fetched but no extraction result came back at all (every
+    call raised, or the step was skipped). An empty `listings` list from
+    "extraction never happened" must never read as "nothing is live"."""
+    assert should_allow_mass_withdrawal(_outcome(selected=10, fetched=10), []) is False

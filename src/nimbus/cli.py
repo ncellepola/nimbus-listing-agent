@@ -39,6 +39,7 @@ from nimbus.fetch.backends import HttpxBackend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.heal import heal_site, site_health
+from nimbus.models import ExtractionResult, Listing
 
 app = typer.Typer(
     name="nimbus",
@@ -159,13 +160,15 @@ def crawl(
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=api_key)
-    listings = []
+    listings: list[Listing] = []
+    results: list[ExtractionResult] = []
     for record in outcome.records:
         try:
             result = asyncio.run(extract_listing(record, recipe, client=client))
         except ExtractionError as exc:
             typer.echo(f"  extraction failed for {record.url}: {exc}")
             continue
+        results.append(result)
         # NOTE: extract_listing does not surface the raw response's token
         # usage, so real cost accounting is not wired up here -- see
         # README's "what is not built" section. The audit row is still
@@ -187,9 +190,14 @@ def crawl(
     # should_allow_mass_withdrawal, not a bare `outcome.fetched > 0`: a
     # crawl that selected 1075 URLs and fetched exactly one of them must
     # not be trusted to authorise withdrawing the other 1074 previously
-    # stored listings. See nimbus.delta.should_allow_mass_withdrawal.
+    # stored listings -- and neither must one that fetched all 195 and
+    # then extracted nothing from any of them, which is what a site
+    # redesign looks like. Both signals go in.
     report = apply_delta(
-        conn, domain, listings, allow_mass_withdrawal=should_allow_mass_withdrawal(outcome)
+        conn,
+        domain,
+        listings,
+        allow_mass_withdrawal=should_allow_mass_withdrawal(outcome, results),
     )
     console.print_delta(f"{domain} delta", report)
 

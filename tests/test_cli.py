@@ -19,6 +19,7 @@ a mostly-failed crawl, with the real `apply_delta` and the real
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,8 +27,16 @@ from conftest import make_recipe
 from typer.testing import CliRunner
 
 from nimbus.cli import app
-from nimbus.models import CrawlOutcome, Listing, PropertyType, Tenure
-from nimbus.storage import init_db, list_listings, save_recipe, upsert_listing
+from nimbus.models import (
+    CrawlOutcome,
+    CrawlRecord,
+    ExtractionResult,
+    Listing,
+    PropertyType,
+    RejectionReason,
+    Tenure,
+)
+from nimbus.storage import init_db, save_recipe, upsert_listing
 
 runner = CliRunner()
 
@@ -240,7 +249,87 @@ def test_crawl_never_derives_allow_mass_withdrawal_from_fetched_greater_than_zer
     result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
 
     assert result.exit_code == 0, result.output
-    remaining = {listing.source_url for listing in list_listings(conn, DOMAIN)}
-    assert remaining == set(stored_urls), "a mostly-failed crawl must not withdraw anything"
+    # Asserted on the report, not on `list_listings`: a suppressed and an
+    # applied withdrawal both leave every row in place, so "every stored
+    # URL is still there" passes just as happily with the guard removed.
+    # Only the report distinguishes the two outcomes.
+    assert "withdrawn=0" in result.output
+    assert "withdrawal suppressed" in result.output.lower()
+
+
+def test_crawl_does_not_withdraw_when_a_full_crawl_extracts_nothing(tmp_path, monkeypatch):
+    """The redesign shape, end to end, and the composition two of this
+    repo's own passing tests left open: every URL still resolves so the
+    crawl fetches 195/195 and scores a perfect fetch ratio, then every
+    extraction fails against markup the recipe no longer matches. The
+    fetch-completeness guard sees a flawless run; `listings` is empty; and
+    without the extraction signal the whole domain gets withdrawn -- in
+    precisely the scenario the heal subsystem exists for."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+    stored_urls = [f"https://www.{DOMAIN}/property-details/{n}" for n in range(10)]
+    for n, url in enumerate(stored_urls):
+        upsert_listing(
+            conn,
+            Listing(
+                source_domain=DOMAIN,
+                source_url=url,
+                address=f"{n} Example Street, Sale",
+                price_gbp=100_000 + n,
+                property_type=PropertyType.DETACHED,
+                tenure=Tenure.FREEHOLD,
+                content_hash=f"hash{n}",
+            ),
+        )
+
+    records = [
+        CrawlRecord(
+            url=url,
+            html="<html><div>redesigned, unparseable by this recipe</div></html>",
+            from_cache=False,
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+            content_hash=f"new{n}",
+        )
+        for n, url in enumerate(stored_urls)
+    ]
+    full_crawl = CrawlOutcome(
+        domain=DOMAIN,
+        records=records,
+        candidates=10,
+        selected=10,
+        attempted=10,
+        fetched=10,
+        skipped_robots=0,
+        skipped_errors=0,
+    )
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return full_crawl
+
+    async def fake_extract_listing(record, recipe, *, client):
+        return ExtractionResult(
+            listing=None,
+            overall_confidence=0.0,
+            needs_review=True,
+            issues=["page has no heading or price-hint content to corroborate against"],
+            rejection_reason=RejectionReason.NO_CORROBORATION_REGION,
+        )
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+    monkeypatch.setattr("nimbus.cli.extract_listing", fake_extract_listing)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    # The crawl itself looked perfect -- that is the whole point.
+    assert "10 selected, 10 attempted, 10 fetched" in result.output
     assert "withdrawn=0" in result.output
     assert "withdrawal suppressed" in result.output.lower()

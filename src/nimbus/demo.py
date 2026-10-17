@@ -52,7 +52,7 @@ from nimbus.fetch.backends import HttpxBackend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.heal import heal_site, needs_heal, site_health
-from nimbus.models import CrawlOutcome, Listing, SiteRecipe
+from nimbus.models import CrawlOutcome, ExtractionResult, Listing, SiteRecipe
 
 # src/nimbus/demo.py -> nimbus -> src -> repo root, same convention
 # nimbus.discovery._REPO_ROOT uses -- computed from this file's own
@@ -173,11 +173,15 @@ def _page_for_url(url: str) -> _DemoPage:
 
 async def _extract_and_record(
     conn: sqlite3.Connection, recipe: SiteRecipe, outcome: CrawlOutcome
-) -> list[Listing]:
+) -> tuple[list[Listing], list[ExtractionResult]]:
     """Extract every record in `outcome` against the stub client, record
     each attempt's audit row, and return the successfully extracted
-    `Listing`s. Mirrors `tests/test_heal.py::_extract_and_record`."""
+    `Listing`s alongside every `ExtractionResult`. Both are needed: the
+    listings are what `apply_delta` compares, the results are what
+    `should_allow_mass_withdrawal` reads to tell a redesign from a
+    sell-off. Mirrors `tests/test_heal.py::_extract_and_record`."""
     listings: list[Listing] = []
+    results: list[ExtractionResult] = []
     for record in outcome.records:
         _, _, address, price = _page_for_url(record.url)
         result = await extract_listing(
@@ -193,6 +197,7 @@ async def _extract_and_record(
             output_tokens=0,
             cost_usd=0.0,
         )
+        results.append(result)
         slug = record.url.rstrip("/").rsplit("/", 1)[-1]
         if result.listing is not None:
             extracted_price = console.format_price(result.listing.price_gbp)
@@ -206,7 +211,7 @@ async def _extract_and_record(
             # the audit row's text intact.
             headline = reason.split(";")[0].split(" (")[0]
             typer.echo(f"      {slug}: extraction REJECTED -- {headline}")
-    return listings
+    return listings, results
 
 
 async def run_offline_demo() -> None:
@@ -251,12 +256,12 @@ async def run_offline_demo() -> None:
             f"{outcome.fetched} fetched (crawl_delay={policy.crawl_delay}s -- this site's "
             "robots.txt declares no Crawl-delay, so this is the configured default)"
         )
-        listings = await _extract_and_record(conn, recipe, outcome)
+        listings, results = await _extract_and_record(conn, recipe, outcome)
         first_delta = apply_delta(
             conn,
             recipe.domain,
             listings,
-            allow_mass_withdrawal=should_allow_mass_withdrawal(outcome),
+            allow_mass_withdrawal=should_allow_mass_withdrawal(outcome, results),
         )
         console.print_delta("      delta", first_delta)
 
@@ -307,7 +312,9 @@ async def run_offline_demo() -> None:
         recovered_outcome = await crawl_site(
             new_recipe, fetcher=fetcher, crawl_delay=policy.crawl_delay, sleep=_no_sleep
         )
-        recovered_listings = await _extract_and_record(conn, new_recipe, recovered_outcome)
+        recovered_listings, recovered_results = await _extract_and_record(
+            conn, new_recipe, recovered_outcome
+        )
 
         health_after = site_health(conn, recipe.domain, window=len(_PAGES))
         console.print_health("      health after the repair", health_after)
@@ -316,7 +323,9 @@ async def run_offline_demo() -> None:
             conn,
             recipe.domain,
             recovered_listings,
-            allow_mass_withdrawal=should_allow_mass_withdrawal(recovered_outcome),
+            allow_mass_withdrawal=should_allow_mass_withdrawal(
+                recovered_outcome, recovered_results
+            ),
         )
         console.print_delta("      post-heal delta", recovered_delta)
 
@@ -368,6 +377,7 @@ async def run_live_demo(settings: Settings) -> None:
 
         client = AsyncAnthropic(api_key=api_key)
         listings: list[Listing] = []
+        results: list[ExtractionResult] = []
         typer.echo("\n[3/3] Extracting...")
         for record in outcome.records:
             try:
@@ -375,6 +385,7 @@ async def run_live_demo(settings: Settings) -> None:
             except ExtractionError as exc:
                 typer.echo(f"      extraction failed for {record.url}: {exc}")
                 continue
+            results.append(result)
             record_extraction(
                 conn,
                 record,
@@ -392,7 +403,7 @@ async def run_live_demo(settings: Settings) -> None:
             conn,
             _DOMAIN,
             listings,
-            allow_mass_withdrawal=should_allow_mass_withdrawal(outcome),
+            allow_mass_withdrawal=should_allow_mass_withdrawal(outcome, results),
         )
         console.print_delta("delta", delta_report)
 

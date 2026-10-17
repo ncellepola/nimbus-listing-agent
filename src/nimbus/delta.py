@@ -33,7 +33,13 @@ import logging
 import sqlite3
 
 from nimbus import storage
-from nimbus.models import CrawlOutcome, DeltaReport, Listing
+from nimbus.models import (
+    DELIBERATE_EXCLUSIONS,
+    CrawlOutcome,
+    DeltaReport,
+    ExtractionResult,
+    Listing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,30 +60,80 @@ _MASS_WITHDRAWAL_FRACTION = 0.5
 # not from any bare truthiness check on `outcome.fetched`.
 MASS_WITHDRAWAL_FETCH_RATIO = 0.9
 
+# How much of what the run could *judge* must actually have yielded a
+# Listing. Fetching is not the signal that drives withdrawal -- extraction
+# is: `apply_delta` compares stored URLs against the `listings` it is
+# handed, and a site redesign leaves every URL resolving perfectly while
+# breaking every extraction. That run scores a fetch ratio of exactly 1.0
+# and would, on the fetch ratio alone, be authorised to withdraw the whole
+# domain. It is the one scenario the heal subsystem exists for, and the
+# guard did not fire in it.
+#
+# 0.5 rather than the fetch path's 0.9 because the two failure modes are
+# shaped differently. A fetch either worked or did not; extraction has a
+# legitimate tail -- a land or commercial page with no parseable heading,
+# a listing whose markup is genuinely unusual -- that does not mean the
+# recipe is broken. What this must catch is the collapse towards zero, not
+# a few percent of noise. Deliberate exclusions (Sold STC, To Let) leave
+# the denominator entirely, for the same reason `site_health` drops them:
+# they are correct outcomes, and on this repo's own ashworthholme.co.uk
+# fixtures they are two thirds of every page crawled.
+MASS_WITHDRAWAL_EXTRACTION_RATIO = 0.5
+
 
 def should_allow_mass_withdrawal(
-    outcome: CrawlOutcome, *, min_fetch_ratio: float = MASS_WITHDRAWAL_FETCH_RATIO
+    outcome: CrawlOutcome,
+    results: list[ExtractionResult],
+    *,
+    min_fetch_ratio: float = MASS_WITHDRAWAL_FETCH_RATIO,
+    min_extraction_ratio: float = MASS_WITHDRAWAL_EXTRACTION_RATIO,
 ) -> bool:
-    """Whether `outcome` fetched enough of its own selected URLs to trust
-    a proposed mass withdrawal as real rather than as a failed or partial
-    crawl. `outcome.selected == 0` (no candidates matched this recipe's
-    patterns at all -- recipe drift, not a quiet night) is never trusted
-    either, for the same reason.
+    """Whether this run is trustworthy enough to authorise withdrawing
+    more than half of a domain's stored listings.
 
-    An explicit `--limit` is disqualifying outright, before the ratio is
-    even considered. A limited run deliberately looks at a slice of the
-    site; the URLs it never opened are not absent, they are unexamined.
-    This is not belt-and-braces on top of the ratio: the ratio is computed
-    against `outcome.selected`, which is the untruncated count precisely
-    so that a limited run cannot score 1.0 -- but an operator who passes
-    `--limit 195` to a 195-listing site would still clear the ratio, and
-    should still not be able to wipe the dataset from an ad-hoc run.
+    `results` is every `ExtractionResult` the run produced, in any order,
+    and is required rather than optional on purpose: the caller cannot
+    forget to supply the signal that actually drives withdrawal.
+
+    Four ways to fail, each a distinct real shape:
+
+    - an explicit `--limit` was applied. A limited run deliberately looks
+      at a slice of the site; the URLs it never opened are not absent,
+      they are unexamined. Disqualifying in its own right, because a
+      `--limit` equal to the selected set would otherwise clear the ratio.
+    - nothing was selected at all (`outcome.selected == 0`): no candidate
+      matched the recipe's patterns, which is recipe drift, not a quiet
+      night.
+    - too little of what the recipe implied was actually fetched. A crawl
+      that selected 1075 URLs and fetched one of them is evidence the
+      crawl failed, not that 1074 listings sold overnight.
+    - too little of what *was* fetched survived extraction. This is the
+      redesign case: URLs intact, markup changed, every extraction
+      failing. See `MASS_WITHDRAWAL_EXTRACTION_RATIO` above.
     """
     if outcome.limit_applied:
         return False
     if outcome.selected == 0:
         return False
-    return outcome.fetched >= outcome.selected * min_fetch_ratio
+    if outcome.fetched < outcome.selected * min_fetch_ratio:
+        return False
+
+    if outcome.fetched > 0 and not results:
+        # Pages were fetched but extraction produced nothing at all --
+        # every call raised, or the step never ran. An empty `listings`
+        # list caused by "extraction did not happen" must never be read
+        # as "nothing is live any more".
+        return False
+
+    judgeable = [r for r in results if r.rejection_reason not in DELIBERATE_EXCLUSIONS]
+    if not judgeable:
+        # Everything this run saw was a correct non-sale exclusion. That
+        # says the recipe is fine, but it is no evidence about the stored
+        # listings either, so it does not authorise removing them.
+        return False
+
+    extracted = sum(1 for r in judgeable if r.listing is not None)
+    return extracted >= len(judgeable) * min_extraction_ratio
 
 
 def apply_delta(
