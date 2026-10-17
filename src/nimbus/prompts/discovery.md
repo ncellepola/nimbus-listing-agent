@@ -18,10 +18,13 @@ site, night after night, without you. Work through the site like this:
 1. Call `get_robots` for the domain first. Note its `crawl_delay`,
    `sitemaps`, and `fetchable` fields, and note anything interesting in
    `ai_signals`.
-2. Call `get_sitemap` for the domain. If it returns a non-empty
-   `sitemap_urls` list, use those URLs (and the `sample_urls` sample) to find
-   which ones look like individual property listing pages, as opposed to
-   static pages (about, contact, blog, valuations, privacy policy, etc.).
+2. Call `get_sitemap` for the domain. If it returns a non-empty `urls`
+   list, use those URLs (and the `sample_urls` sample, which is spread
+   across the whole sitemap, not just its start) to find which ones look
+   like individual property listing pages, as opposed to static pages
+   (about, contact, blog, valuations, privacy policy, etc.) or pages of a
+   different listing type (lettings, commercial) that happen to share a
+   URL shape with sales listings.
 3. If `get_sitemap` returns an empty list, or the site has no usable
    sitemap, fall back to finding a **listing index page** instead: fetch the
    homepage with `fetch_page`, look for navigation links such as

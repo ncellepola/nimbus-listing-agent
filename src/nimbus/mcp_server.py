@@ -36,6 +36,12 @@ from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
 # entirely (not merely unwrapped) before markdown conversion.
 _STRIP_TAGS = ("script", "style", "nav", "footer")
 
+# Size of get_sitemap's stratified sample_urls. 25, not 10: a sample this
+# small still needs to be spread across a sitemap of thousands of URLs
+# (see _stratified_sample) with enough URLs surviving to cover more than
+# one property-type/branch/date grouping.
+_SAMPLE_SIZE = 25
+
 
 def _html_to_markdown(html: str) -> str:
     """Strip boilerplate tags (content included, not just the wrapper) and
@@ -61,6 +67,31 @@ def _locs(root: ET.Element) -> list[str]:
             if _strip_ns(child.tag) == "loc" and child.text:
                 out.append(child.text.strip())
     return out
+
+
+def _stratified_sample(urls: list[str], size: int) -> list[str]:
+    """`size` URLs spread evenly across the whole list, not just its head.
+
+    A sitemap grouped by property type, branch, or listing date puts every
+    URL of one category before any URL of another (396 `property-to-rent`
+    URLs then 679 `property-for-sale` URLs is a real example that broke
+    discovery against a live site: `urls[:10]` was ten rentals and no sale
+    listing anywhere in the sample). Taking every `len(urls) / size`'th
+    index instead means a sample always has a chance of covering every
+    category, however the sitemap is ordered. Deterministic: the same
+    `urls` list always yields the same sample."""
+    if len(urls) <= size:
+        return list(urls)
+
+    stride = len(urls) / size
+    seen_indices: set[int] = set()
+    sample: list[str] = []
+    for i in range(size):
+        index = int(i * stride)
+        if index not in seen_indices:
+            seen_indices.add(index)
+            sample.append(urls[index])
+    return sample
 
 
 def _make_get_robots(fetcher: Fetcher) -> Callable:
@@ -119,9 +150,15 @@ def _make_get_sitemap(fetcher: Fetcher) -> Callable:
 
         urls = urls[:max_urls]
         return {
-            "sitemap_urls": urls,
+            # The discovered *page* URLs. Named `urls`, not `sitemap_urls`,
+            # so it cannot be confused with SiteRecipe.sitemap_urls, where
+            # that name means the sitemap *file* locations, not the pages
+            # listed inside them.
+            "urls": urls,
             "url_count": len(urls),
-            "sample_urls": urls[:10],
+            "sample_urls": _stratified_sample(urls, _SAMPLE_SIZE),
+            # The sitemap file(s) actually fetched to produce `urls`.
+            "sitemap_roots": roots,
         }
 
     return get_sitemap
