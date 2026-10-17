@@ -212,7 +212,13 @@ human-readable diff of what changed.
 
 `apply_delta` compares one run's extracted listings against what storage
 already has for a domain, by `source_url` (the one stable key across a
-redesign, a price change, or a relist — never address text). It persists
+redesign, a price change, or a relist — never address text). The cost of
+that key, which matters downstream rather than here: the same physical
+property marketed by several agents enters as several rows, with
+addresses written several different ways and asking prices that may
+contradict each other, so anything that counts properties (the pricing
+model's comparable sets and training data above all) must deduplicate to
+a physical property first — see `docs/pricing-model.md` §1. It persists
 the new state and writes a `listing_history` row for every real price
 change. A guard refuses to report more than half of a domain's stored
 listings as withdrawn in one run unless the caller explicitly passes
@@ -222,23 +228,37 @@ and a mass withdrawal does proceed, it is logged at `WARNING` so the one
 most consequential write this module can make is never silent.
 
 That guard is only as good as what a caller passes into it, which is why
-`delta.py` also owns `should_allow_mass_withdrawal(outcome)`: every
+`delta.py` also owns `should_allow_mass_withdrawal(outcome, results)`: every
 orchestration call site derives `apply_delta`'s `allow_mass_withdrawal`
 from it, never from a bare `outcome.fetched > 0`. `fetched > 0` is
 satisfied by a single lucky page out of a thousand selected ones —
 exactly the failed-crawl-looks-like-a-sell-off shape the guard above exists
 to catch, reopened one layer up if the integration code derives the flag
 from "something worked" instead of from how complete the crawl actually
-was. `should_allow_mass_withdrawal` instead requires at least 90% of the
-crawl's own *selected* URLs to have been fetched (a named constant,
-`MASS_WITHDRAWAL_FETCH_RATIO`).
+was. `should_allow_mass_withdrawal` instead requires all four of:
+
+- no explicit `--limit` was applied (a partial run by request is a slice
+  of the site, not evidence about the pages it never opened),
+- at least 90% of the crawl's own *untruncated* selected URL set was
+  actually fetched (`MASS_WITHDRAWAL_FETCH_RATIO`),
+- extraction produced results at all, and
+- at least half of the results it could judge yielded a `Listing`
+  (`MASS_WITHDRAWAL_EXTRACTION_RATIO`), with deliberate non-sale
+  exclusions left out of that denominator.
+
+The last of those is the one that is easy to miss and does the most work.
+Withdrawal is driven by extraction, not by fetching: a site redesign
+leaves every URL resolving perfectly, so the crawl scores a fetch ratio
+of 1.0 while every extraction fails against markup the recipe no longer
+matches — the exact scenario the heal subsystem exists for, and the one
+the fetch ratio alone waves straight through.
 
 ### `cli.py` — the orchestration layer, and `demo.py` — the presentation path
 
 `cli.py` is five thin commands: `onboard`, `crawl`, `heal`, `report`, and
 `demo` (which just calls into `nimbus.demo`). `crawl` is where the
 `crawl_delay = await fetcher.robots_for(domain)` call site and the
-`should_allow_mass_withdrawal(outcome)` derivation both actually live —
+`should_allow_mass_withdrawal(outcome, results)` derivation both actually live —
 Task 4-6 built the primitives; Task 7 is where they are wired together into
 something that runs end to end.
 
