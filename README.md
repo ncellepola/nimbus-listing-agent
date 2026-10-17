@@ -9,10 +9,24 @@ second half — pricing assessment — is answered in writing, not in code; see
 The answer this repository argues for: an LLM agent learns a previously
 unseen site **once**, producing a small, versioned, auditable data artifact
 (a `SiteRecipe`); deterministic code executes that recipe every night with
-**zero LLM calls on the hot path**; a health monitor watches extraction
-quality and sends the agent back in only when a site's own markup has
-changed enough to need it. Compliance (robots.txt) is enforced in code the
-agent is physically unable to bypass, not requested of it in a prompt.
+**no LLM anywhere in crawling, URL selection, pagination, delta detection
+or health monitoring, and one model call per listing page whose bytes
+actually changed** (`content_hash` is compared against the stored listing
+first, so an unchanged page costs nothing; a Sold-STC or To-Let status
+heading is rejected by a deterministic pre-filter before any call, which
+on this repo's own cached pages is two thirds of one site's traffic); a
+health monitor watches extraction quality and sends the agent back in only
+when a site's own markup has changed enough to need it. Compliance
+(robots.txt) is enforced in code the agent is physically unable to bypass,
+not requested of it in a prompt, and it fails *closed*: a robots.txt we
+could not read is not permission.
+
+The precise version of the cost claim, because the loose one ("zero LLM
+calls on the hot path") was false and is worth stating exactly: the only
+model call in the nightly path is extraction, and it happens once per
+changed listing page. Everything that decides *which* pages to fetch, in
+what order, how far to paginate, what changed since last night, and
+whether a site has broken is plain Python reading a stored recipe.
 
 ## Architecture, in one diagram
 

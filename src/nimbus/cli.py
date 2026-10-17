@@ -34,7 +34,12 @@ from nimbus.config import Settings
 from nimbus.crawler import crawl_site
 from nimbus.delta import apply_delta, should_allow_mass_withdrawal
 from nimbus.discovery import DiscoveryError, discover_site
-from nimbus.extractor import ExtractionError, extract_listing, record_extraction
+from nimbus.extractor import (
+    ExtractionError,
+    extract_listing,
+    record_extraction,
+    unchanged_since_last_run,
+)
 from nimbus.fetch.backends import HttpxBackend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
@@ -162,7 +167,19 @@ def crawl(
     client = AsyncAnthropic(api_key=api_key)
     listings: list[Listing] = []
     results: list[ExtractionResult] = []
+    skipped_unchanged = 0
     for record in outcome.records:
+        # The one LLM call on this path, skipped entirely when the page's
+        # bytes are identical to what was extracted from them last time.
+        # The stored Listing still goes into `listings` and `results`:
+        # last night's extraction is this page's current extraction, and
+        # dropping it here would turn "unchanged" into "withdrawn".
+        unchanged = unchanged_since_last_run(conn, record)
+        if unchanged is not None:
+            skipped_unchanged += 1
+            listings.append(unchanged)
+            results.append(ExtractionResult(listing=unchanged, overall_confidence=1.0))
+            continue
         try:
             result = asyncio.run(extract_listing(record, recipe, client=client))
         except ExtractionError as exc:
@@ -186,6 +203,12 @@ def crawl(
         )
         if result.listing is not None:
             listings.append(result.listing)
+
+    if skipped_unchanged:
+        typer.echo(
+            f"  {skipped_unchanged} unchanged page(s) skipped extraction entirely "
+            "(content_hash identical to the stored listing), at no model cost"
+        )
 
     # should_allow_mass_withdrawal, not a bare `outcome.fetched > 0`: a
     # crawl that selected 1075 URLs and fetched exactly one of them must

@@ -93,8 +93,13 @@ class SiteRecipe(BaseModel):
 
 class CrawlRecord(BaseModel):
     """One page fetched by the deterministic crawler (Task 4), before any
-    extraction happens. `content_hash` lets Task 5's delta detection decide
-    whether a previously-seen page changed without re-extracting it."""
+    extraction happens.
+
+    `content_hash` is what makes the nightly run cheap: `cli.crawl`
+    compares it against the stored `Listing.content_hash` (see
+    `nimbus.extractor.unchanged_since_last_run`) and skips extraction
+    entirely for a page whose bytes have not moved, so the only model call
+    on the nightly path is one per *changed* listing page."""
 
     url: str
     html: str

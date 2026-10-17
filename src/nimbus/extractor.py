@@ -441,6 +441,28 @@ def _empty_result(issue: str, reason: RejectionReason) -> ExtractionResult:
     )
 
 
+def unchanged_since_last_run(conn: sqlite3.Connection, record: CrawlRecord) -> Listing | None:
+    """The stored `Listing` for `record.url` when this run fetched
+    byte-identical HTML, or `None` when there is nothing stored or the
+    page has changed.
+
+    This is what makes "no LLM call for a page that did not change" true
+    rather than merely intended. `content_hash` was computed by the
+    crawler, written to both `listings` and `extraction_audit`, and
+    documented in `models.CrawlRecord` as the skip that avoids
+    re-extraction -- and never read, so the nightly run paid for one model
+    call per listing page per night whether or not a single byte had
+    moved.
+
+    The caller must still pass the returned `Listing` through to
+    `apply_delta`: "we did not need to re-read it" is not "it is gone".
+    """
+    stored = storage.get_listing(conn, record.url)
+    if stored is not None and stored.content_hash == record.content_hash:
+        return stored
+    return None
+
+
 async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) -> ExtractionResult:
     """Extract one `Listing` from `record` using `recipe` as a guide, via a
     single call through `client` (an `anthropic.AsyncAnthropic`-shaped

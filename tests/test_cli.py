@@ -19,6 +19,7 @@ a mostly-failed crawl, with the real `apply_delta` and the real
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -333,3 +334,148 @@ def test_crawl_does_not_withdraw_when_a_full_crawl_extracts_nothing(tmp_path, mo
     assert "10 selected, 10 attempted, 10 fetched" in result.output
     assert "withdrawn=0" in result.output
     assert "withdrawal suppressed" in result.output.lower()
+
+
+def test_crawl_skips_extraction_for_a_page_whose_bytes_have_not_changed(tmp_path, monkeypatch):
+    """`content_hash` was computed, stored on both `listings` and
+    `extraction_audit`, and documented as the thing that avoids
+    re-extraction -- and never consulted, so the nightly run paid for one
+    model call per listing page per night regardless. This is the test
+    for the claim the README makes."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+
+    url = f"https://www.{DOMAIN}/property-details/1"
+    html = "<html><h1>1 Example Street, Sale</h1><h2>For Sale £450,000</h2></html>"
+    content_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    upsert_listing(
+        conn,
+        Listing(
+            source_domain=DOMAIN,
+            source_url=url,
+            address="1 Example Street, Sale",
+            price_gbp=450_000,
+            property_type=PropertyType.DETACHED,
+            tenure=Tenure.FREEHOLD,
+            content_hash=content_hash,
+        ),
+    )
+
+    outcome = CrawlOutcome(
+        domain=DOMAIN,
+        records=[
+            CrawlRecord(
+                url=url,
+                html=html,
+                from_cache=False,
+                fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+                content_hash=content_hash,
+            )
+        ],
+        candidates=1,
+        selected=1,
+        attempted=1,
+        fetched=1,
+        skipped_robots=0,
+        skipped_errors=0,
+    )
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return outcome
+
+    async def must_not_be_called(record, recipe, *, client):
+        raise AssertionError("an unchanged page must not be re-extracted")
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+    monkeypatch.setattr("nimbus.cli.extract_listing", must_not_be_called)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    assert "1 unchanged" in result.output
+    # Skipped, not dropped: the listing must still reach apply_delta, or
+    # "we did not re-read it" would be recorded as "it is gone".
+    assert "unchanged=1" in result.output
+    assert "withdrawn=0" in result.output
+
+
+def test_crawl_re_extracts_a_page_whose_bytes_changed(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+
+    url = f"https://www.{DOMAIN}/property-details/1"
+    upsert_listing(
+        conn,
+        Listing(
+            source_domain=DOMAIN,
+            source_url=url,
+            address="1 Example Street, Sale",
+            price_gbp=450_000,
+            property_type=PropertyType.DETACHED,
+            tenure=Tenure.FREEHOLD,
+            content_hash="yesterdays-hash",
+        ),
+    )
+
+    outcome = CrawlOutcome(
+        domain=DOMAIN,
+        records=[
+            CrawlRecord(
+                url=url,
+                html="<html>reduced</html>",
+                from_cache=False,
+                fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+                content_hash="todays-different-hash",
+            )
+        ],
+        candidates=1,
+        selected=1,
+        attempted=1,
+        fetched=1,
+        skipped_robots=0,
+        skipped_errors=0,
+    )
+    calls: list[str] = []
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return outcome
+
+    async def fake_extract_listing(record, recipe, *, client):
+        calls.append(record.url)
+        return ExtractionResult(
+            listing=Listing(
+                source_domain=DOMAIN,
+                source_url=record.url,
+                address="1 Example Street, Sale",
+                price_gbp=425_000,
+                property_type=PropertyType.DETACHED,
+                tenure=Tenure.FREEHOLD,
+                content_hash=record.content_hash,
+            ),
+            overall_confidence=1.0,
+        )
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+    monkeypatch.setattr("nimbus.cli.extract_listing", fake_extract_listing)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [url]
+    assert "price_changed=1" in result.output
