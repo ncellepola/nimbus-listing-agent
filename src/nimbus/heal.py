@@ -137,7 +137,16 @@ async def heal_site(
 
     Raises `nimbus.discovery.DiscoveryError` if discovery itself cannot
     produce a sound recipe — this function does not swallow that, since a
-    failed heal must be visible, not mistaken for a successful one."""
+    failed heal must be visible, not mistaken for a successful one.
+
+    Test coverage note: the default (`-m "not live"`) suite monkeypatches
+    `discover_site` and proves only the plumbing here — that this
+    function loads the previous recipe, calls discovery, saves the result
+    append-only, and diffs correctly, and that a *correct* replacement
+    recipe does restore extraction health. It does not and cannot prove
+    that the real agent would re-learn a given redesign unaided; only
+    `nimbus.discovery`'s own `@pytest.mark.live` tests exercise the real
+    `discover_site` call, and those are excluded by default."""
     previous = storage.load_recipe(conn, domain)
 
     new_recipe = await discover_site(domain, settings=settings)

@@ -161,3 +161,8 @@ class DeltaReport(BaseModel):
     price_changed: list[tuple[str, int, int]] = Field(default_factory=list)
     withdrawn: list[str] = Field(default_factory=list)
     unchanged: list[str] = Field(default_factory=list)
+    # True when apply_delta refused to report a mass withdrawal (more than
+    # half of a domain's stored listings vanishing in one run -- almost
+    # always a failed or partial crawl, not an overnight sell-off) and left
+    # those listings untouched instead. See nimbus.delta.apply_delta.
+    withdrawal_suppressed: bool = False

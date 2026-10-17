@@ -9,6 +9,7 @@ import sqlite3
 
 from conftest import make_listing
 
+from nimbus import storage
 from nimbus.delta import apply_delta
 from nimbus.storage import init_db
 
@@ -104,3 +105,56 @@ def test_apply_delta_scopes_withdrawn_to_the_given_domain(tmp_path):
     report = apply_delta(conn, DOMAIN, [])
 
     assert report.withdrawn == []
+
+
+def _seed_five_listings(conn: sqlite3.Connection) -> list[str]:
+    urls = [f"https://www.ashworthholme.co.uk/property-details/{n}" for n in range(5)]
+    listings = [
+        make_listing(source_url=url, price_gbp=100_000 + n, content_hash=f"hash{n}")
+        for n, url in enumerate(urls)
+    ]
+    apply_delta(conn, DOMAIN, listings)
+    return urls
+
+
+def test_apply_delta_suppresses_mass_withdrawal_by_default(tmp_path, caplog):
+    conn = init_db(tmp_path / "nimbus.db")
+    urls = _seed_five_listings(conn)
+
+    with caplog.at_level("ERROR"):
+        report = apply_delta(conn, DOMAIN, [])
+
+    assert report.withdrawn == []
+    assert report.withdrawal_suppressed is True
+    # Nothing was wiped: every previously stored listing is still there.
+    stored_urls = {listing.source_url for listing in storage.list_listings(conn, DOMAIN)}
+    assert stored_urls == set(urls)
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any(DOMAIN in r.message and "5" in r.message for r in error_records)
+
+
+def test_apply_delta_marks_a_minority_withdrawn_normally(tmp_path, caplog):
+    conn = init_db(tmp_path / "nimbus.db")
+    urls = _seed_five_listings(conn)
+    remaining = urls[1:]  # drop just one of five -- 20%, not a mass withdrawal
+
+    listings = [
+        make_listing(source_url=url, price_gbp=100_000, content_hash="h") for url in remaining
+    ]
+
+    with caplog.at_level("ERROR"):
+        report = apply_delta(conn, DOMAIN, listings)
+
+    assert report.withdrawn == [urls[0]]
+    assert report.withdrawal_suppressed is False
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_apply_delta_allow_mass_withdrawal_overrides_the_guard(tmp_path):
+    conn = init_db(tmp_path / "nimbus.db")
+    urls = _seed_five_listings(conn)
+
+    report = apply_delta(conn, DOMAIN, [], allow_mass_withdrawal=True)
+
+    assert set(report.withdrawn) == set(urls)
+    assert report.withdrawal_suppressed is False
