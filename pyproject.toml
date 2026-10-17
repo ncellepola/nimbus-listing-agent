@@ -11,6 +11,7 @@ dependencies = [
     "mcp>=2,<3",
     "markdownify>=0.13",
     "beautifulsoup4>=4.12",
+    "claude-agent-sdk>=0.2.168",
 ]
 
 [project.scripts]
