@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from nimbus import storage
 from nimbus.config import Settings
 from nimbus.discovery import discover_site
-from nimbus.models import SiteHealth, SiteRecipe
+from nimbus.models import DELIBERATE_EXCLUSIONS, SiteHealth, SiteRecipe
 
 DEFAULT_HEAL_THRESHOLD = 0.8
 
@@ -45,12 +45,39 @@ def site_health(conn: sqlite3.Connection, domain: str, window: int = 50) -> Site
     `extraction_audit` rows, newest first. `sample_size` is the number of
     matching rows actually found, which is `window` only once at least
     that many audit rows exist for `domain` — it is never padded or
-    extrapolated."""
+    extrapolated.
+
+    Rows recording a *deliberate exclusion* (`RejectionReason` values in
+    `DELIBERATE_EXCLUSIONS` — a Sold-STC or To-Let page the extractor
+    correctly refused) are dropped from the sample entirely rather than
+    counted as invalid, and reported separately as
+    `deliberate_exclusions`. Counting them was a real defect, not a
+    refinement: 12 of this repo's own 18 cached ashworthholme.co.uk pages
+    are correctly-rejected non-sales, so a perfectly working recipe
+    scored schema_valid_rate=0.333 and tripped `needs_heal`. Under a
+    scheduler that calls the discovery agent nightly, forever, inverting
+    the cost argument the whole architecture rests on."""
     rows = conn.execute(
-        "SELECT url, schema_valid, needs_review FROM extraction_audit ORDER BY id DESC"
+        "SELECT url, schema_valid, needs_review, rejection_reason "
+        "FROM extraction_audit ORDER BY id DESC"
     ).fetchall()
 
-    sample = [row for row in rows if row["url"] and _netloc_matches(row["url"], domain)][:window]
+    deliberate = {reason.value for reason in DELIBERATE_EXCLUSIONS}
+
+    # One pass, newest first, so `sample` and `exclusions` describe the
+    # same stretch of history rather than two differently-sized windows.
+    sample: list[sqlite3.Row] = []
+    exclusions = 0
+    for row in rows:
+        if len(sample) == window:
+            break
+        if not row["url"] or not _netloc_matches(row["url"], domain):
+            continue
+        if row["rejection_reason"] in deliberate:
+            exclusions += 1
+            continue
+        sample.append(row)
+
     sample_size = len(sample)
 
     if sample_size == 0:
@@ -60,6 +87,7 @@ def site_health(conn: sqlite3.Connection, domain: str, window: int = 50) -> Site
             schema_valid_rate=0.0,
             needs_review_rate=0.0,
             sample_size=0,
+            deliberate_exclusions=exclusions,
         )
 
     schema_valid_rate = sum(1 for row in sample if row["schema_valid"]) / sample_size
@@ -71,6 +99,7 @@ def site_health(conn: sqlite3.Connection, domain: str, window: int = 50) -> Site
         schema_valid_rate=schema_valid_rate,
         needs_review_rate=needs_review_rate,
         sample_size=sample_size,
+        deliberate_exclusions=exclusions,
     )
 
 

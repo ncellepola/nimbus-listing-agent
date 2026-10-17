@@ -60,7 +60,15 @@ from pydantic import ValidationError
 
 from nimbus import storage
 from nimbus.htmltext import html_to_markdown
-from nimbus.models import CrawlRecord, ExtractionResult, Listing, PropertyType, SiteRecipe, Tenure
+from nimbus.models import (
+    CrawlRecord,
+    ExtractionResult,
+    Listing,
+    PropertyType,
+    RejectionReason,
+    SiteRecipe,
+    Tenure,
+)
 
 
 class ExtractionError(Exception):
@@ -140,6 +148,24 @@ _QUALIFIER_KEYWORDS: list[tuple[str, str]] = [
 _RENTAL_MARKERS = ("pcm", "per calendar month", "per month", "/pm", "pw")
 _LETTING_STATUS_MARKERS = ("to let", "let agreed", "to rent")
 _SOLD_MARKERS = ("sold stc", "sold subject to contract", "sold")
+
+# Markers the *pre-model* filter acts on. A strict subset of the three
+# tuples above, by design: this filter is an optimisation, never a new
+# policy. It may only skip a model call that `is_residential_sale` would
+# certainly have rejected afterwards, so it carries the unambiguous
+# multi-word status phrases and deliberately omits `_SOLD_MARKERS`' bare
+# "sold" (a "Recently Sold Nearby" nav heading must not cost a live
+# listing) and `_RENTAL_MARKERS`' two-character "pw"/"/pm", which are too
+# short to match safely against a whole corroboration region.
+_UNAMBIGUOUS_NON_SALE_MARKERS = (
+    "sold stc",
+    "sold subject to contract",
+    "to let",
+    "let agreed",
+    "to rent",
+    "pcm",
+    "per calendar month",
+)
 
 _SCORED_FIELDS = (
     "address",
@@ -240,6 +266,24 @@ def is_residential_sale(raw_text: str, listing: Listing) -> bool:
         return False
 
     return True
+
+
+def non_sale_marker(status_text: str) -> str | None:
+    """The first unambiguous non-sale status marker in `status_text`, or
+    `None`. Pure, no LLM, and cheap enough to run before the model call.
+
+    Measured on this repo's own cached pages: 12 of ashworthholme.co.uk's
+    18 listing pages (11 Sold STC, 1 To Let) carry one of these markers in
+    the status heading the corroboration region already contains, with no
+    false positive on any of the 6 live For Sale pages. That is two thirds
+    of that site's extraction spend, previously paid to have the model
+    tell us something the heading already said.
+    """
+    lowered = status_text.lower()
+    for marker in _UNAMBIGUOUS_NON_SALE_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -386,13 +430,14 @@ def _field_confidence(listing: Listing) -> dict[str, float]:
     return scores
 
 
-def _empty_result(issue: str) -> ExtractionResult:
+def _empty_result(issue: str, reason: RejectionReason) -> ExtractionResult:
     return ExtractionResult(
         listing=None,
         field_confidence={},
         overall_confidence=0.0,
         needs_review=True,
         issues=[issue],
+        rejection_reason=reason,
     )
 
 
@@ -420,7 +465,20 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
         return _empty_result(
             "page has no heading or price-hint content to corroborate against; it is "
             "likely a client-rendered page with no listing data in the fetched HTML "
-            "(or the recipe's field hints no longer match this page)"
+            "(or the recipe's field hints no longer match this page)",
+            RejectionReason.NO_CORROBORATION_REGION,
+        )
+
+    # Deterministic pre-filter, before the one paid call. The status
+    # heading is already in `corroboration_text`; if it says Sold STC or
+    # To Let, `is_residential_sale` is going to reject this page in a
+    # moment anyway, so there is nothing to buy by asking the model first.
+    marker = non_sale_marker(corroboration_text)
+    if marker is not None:
+        return _empty_result(
+            f"page is not an open residential sale listing: its status text carries "
+            f"{marker!r}, so it was rejected before any model call was made",
+            RejectionReason.NOT_RESIDENTIAL_SALE,
         )
 
     page_text = _page_markdown(record.html)
@@ -446,7 +504,9 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
         block for block in response.content if getattr(block, "type", None) == "tool_use"
     ]
     if not tool_blocks:
-        return _empty_result("model did not return structured tool output")
+        return _empty_result(
+            "model did not return structured tool output", RejectionReason.NO_TOOL_OUTPUT
+        )
 
     payload = dict(tool_blocks[0].input)
     price_raw = str(payload.pop("price_raw", "") or "")
@@ -472,12 +532,16 @@ async def extract_listing(record: CrawlRecord, recipe: SiteRecipe, *, client) ->
             content_hash=record.content_hash,
         )
     except ValidationError as exc:
-        return _empty_result(f"model output failed Listing schema validation: {exc}")
+        return _empty_result(
+            f"model output failed Listing schema validation: {exc}",
+            RejectionReason.SCHEMA_INVALID,
+        )
 
     if not is_residential_sale(price_raw, listing):
         return _empty_result(
             f"page is not an open residential sale listing (price/status text {price_raw!r} "
-            "carries a rental, letting, or sold marker)"
+            "carries a rental, letting, or sold marker)",
+            RejectionReason.NOT_RESIDENTIAL_SALE,
         )
 
     issues: list[str] = []
@@ -539,6 +603,13 @@ def audit_row(
         "cost_usd": cost_usd,
         "schema_valid": result.listing is not None,
         "needs_review": result.needs_review,
+        # Which rejection path was taken, or NULL when a Listing was
+        # produced. `nimbus.heal.site_health` reads this to drop
+        # deliberate exclusions from its denominator -- without it, a
+        # site whose stock is mostly Sold STC reads as a collapsed recipe.
+        "rejection_reason": (
+            result.rejection_reason.value if result.rejection_reason is not None else None
+        ),
     }
 
 

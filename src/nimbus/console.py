@@ -36,8 +36,19 @@ def print_delta(label: str, report: DeltaReport) -> None:
 
 
 def print_health(label: str, health: SiteHealth) -> None:
+    # Deliberate exclusions are shown only when there are any, and shown
+    # rather than hidden: an operator reading "sample=6" against a site
+    # with 18 crawled pages should be able to see where the other 12 went
+    # (correctly-rejected Sold-STC / To-Let pages) without opening the
+    # audit table.
+    excluded = (
+        f", {health.deliberate_exclusions} non-sale page(s) excluded"
+        if health.deliberate_exclusions
+        else ""
+    )
     typer.echo(
         f"{label}: schema_valid_rate={health.schema_valid_rate:.0%} "
-        f"needs_review_rate={health.needs_review_rate:.0%} (sample={health.sample_size}) "
+        f"needs_review_rate={health.needs_review_rate:.0%} "
+        f"(sample={health.sample_size}{excluded}) "
         f"-> needs_heal={needs_heal(health)}"
     )

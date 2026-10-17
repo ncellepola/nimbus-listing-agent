@@ -140,12 +140,41 @@ class CrawlOutcome(BaseModel):
     limit_applied: bool = False
 
 
+class RejectionReason(StrEnum):
+    """Why `extract_listing` produced no `Listing`.
+
+    The distinction that matters is between a *deliberate exclusion* and a
+    *failure*. `NOT_RESIDENTIAL_SALE` means the pipeline worked exactly as
+    designed and decided this page is a Sold-STC or To-Let listing we do
+    not collect; the other three mean something went wrong, and are the
+    signal Task 6's health monitor exists to watch. Conflating them made a
+    *correct* recipe on this project's own demo site report
+    schema_valid_rate=0.333 and needs_heal=True, because 12 of
+    ashworthholme.co.uk's 18 cached pages are correctly-rejected non-sales.
+    """
+
+    NOT_RESIDENTIAL_SALE = "not_residential_sale"
+    NO_CORROBORATION_REGION = "no_corroboration_region"
+    NO_TOOL_OUTPUT = "no_tool_output"
+    SCHEMA_INVALID = "schema_invalid"
+
+
+# Rejections that are correct outcomes rather than evidence of drift.
+# `nimbus.heal.site_health` drops these from its denominator entirely:
+# they say nothing about whether the recipe still matches the site.
+DELIBERATE_EXCLUSIONS = frozenset({RejectionReason.NOT_RESIDENTIAL_SALE})
+
+
 class ExtractionResult(BaseModel):
     listing: Listing | None = None
     field_confidence: dict[str, float] = Field(default_factory=dict)
     overall_confidence: float = Field(ge=0.0, le=1.0)
     needs_review: bool = False
     issues: list[str] = Field(default_factory=list)
+    # None whenever `listing` is set. Otherwise names which of the four
+    # rejection paths was taken, so the audit row -- and through it
+    # site_health -- can tell a deliberate exclusion from a failure.
+    rejection_reason: RejectionReason | None = None
 
 
 class AiSignals(BaseModel):
@@ -166,6 +195,12 @@ class SiteHealth(BaseModel):
     schema_valid_rate: float = Field(ge=0.0, le=1.0)
     needs_review_rate: float = Field(ge=0.0, le=1.0)
     sample_size: int = Field(ge=0)
+    # Audit rows that were dropped from the sample above because they
+    # record a deliberate exclusion (a Sold-STC or To-Let page the
+    # extractor correctly refused) rather than a failure. Reported, not
+    # hidden: an operator should be able to see that a site's health is
+    # being judged on 6 pages out of 18 and why.
+    deliberate_exclusions: int = Field(default=0, ge=0)
 
 
 class DeltaReport(BaseModel):

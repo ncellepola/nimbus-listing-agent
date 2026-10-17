@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS extraction_audit (
     cost_usd REAL,
     schema_valid INTEGER NOT NULL,
     needs_review INTEGER NOT NULL,
+    rejection_reason TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -94,6 +95,24 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
 """
 
 
+# Columns added after the first schema shipped. `CREATE TABLE IF NOT
+# EXISTS` does nothing to a table that already exists, so a database
+# created by an earlier version would silently lack these and every query
+# touching them would fail at runtime -- a migration an operator cannot
+# forget is cheaper than a release note they can.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("extraction_audit", "rejection_reason", "TEXT"),
+    ("listings", "withdrawn_at", "TEXT"),
+]
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, column_type in _ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
 def init_db(path: Path) -> sqlite3.Connection:
     path = Path(path)
     if str(path) != ":memory:":
@@ -101,6 +120,7 @@ def init_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
     conn.commit()
     return conn
 
