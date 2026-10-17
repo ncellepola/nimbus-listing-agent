@@ -48,7 +48,7 @@ from nimbus.crawler import crawl_site
 from nimbus.delta import apply_delta, should_allow_mass_withdrawal
 from nimbus.discovery import DiscoveryError, discover_site
 from nimbus.extractor import ExtractionError, extract_listing, record_extraction
-from nimbus.fetch.backends import HttpxBackend
+from nimbus.fetch.backends import build_backend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.heal import heal_site, needs_heal, site_health
@@ -364,7 +364,7 @@ async def run_live_demo(settings: Settings) -> None:
         typer.echo(f"      saved v{version}, confidence={recipe.confidence:.2f}")
 
         cache = HtmlCache(root=live_settings.cache_dir)
-        fetcher = Fetcher(live_settings, cache, HttpxBackend(user_agent=live_settings.user_agent))
+        fetcher = Fetcher(live_settings, cache, build_backend(live_settings))
         policy = await fetcher.robots_for(_DOMAIN)
         typer.echo(
             f"\n[2/3] Crawling live (crawl_delay={policy.crawl_delay}s -- from robots.txt if it "

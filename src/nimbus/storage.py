@@ -376,6 +376,35 @@ def upsert_listing(conn: sqlite3.Connection, listing: Listing) -> None:
     conn.commit()
 
 
+def record_crawl_run(
+    conn: sqlite3.Connection,
+    domain: str,
+    *,
+    started_at: datetime,
+    pages_fetched: int,
+    listings_found: int,
+) -> None:
+    """One row per completed nightly crawl.
+
+    `CrawlOutcome` carries its counts specifically so an orchestration
+    layer can write this without re-crawling, and four places in this
+    codebase justified those counts by saying so -- while nothing ever
+    wrote the row. `cli.crawl` does now.
+    """
+    conn.execute(
+        "INSERT INTO crawl_runs (domain, started_at, finished_at, pages_fetched, "
+        "listings_found) VALUES (?, ?, ?, ?, ?)",
+        (
+            domain,
+            started_at.isoformat(),
+            datetime.now(UTC).isoformat(),
+            pages_fetched,
+            listings_found,
+        ),
+    )
+    conn.commit()
+
+
 def insert_price_history(
     conn: sqlite3.Connection,
     source_url: str,

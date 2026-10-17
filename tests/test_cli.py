@@ -28,6 +28,7 @@ from conftest import make_recipe
 from typer.testing import CliRunner
 
 from nimbus.cli import app
+from nimbus.fetch.backends import CrawlbaseBackend
 from nimbus.models import (
     CrawlOutcome,
     CrawlRecord,
@@ -479,3 +480,85 @@ def test_crawl_re_extracts_a_page_whose_bytes_changed(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls == [url]
     assert "price_changed=1" in result.output
+
+
+def test_crawl_writes_a_crawl_runs_row(tmp_path, monkeypatch):
+    """`crawl_runs` was created by the schema and never written to, while
+    four places in the codebase justified `CrawlOutcome`'s counts by
+    saying an orchestrator needs them to write a truthful row."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+
+    outcome = CrawlOutcome(
+        domain=DOMAIN,
+        records=[],
+        candidates=7,
+        selected=4,
+        attempted=4,
+        fetched=3,
+        skipped_robots=1,
+        skipped_errors=0,
+    )
+
+    async def fake_robots_for(self, domain):
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return outcome
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    rows = init_db(db).execute("SELECT * FROM crawl_runs").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["domain"] == DOMAIN
+    assert rows[0]["pages_fetched"] == 3
+    assert rows[0]["finished_at"]
+
+
+def test_crawl_uses_the_configured_fetch_backend(tmp_path, monkeypatch):
+    """ADR-0005 and .env.example both present FETCH_BACKEND as the live
+    switch for pointing a problem site at a paid service "without
+    touching Fetcher" -- but only mcp_server.main() read it, so the crawl
+    path hardcoded httpx and the setting silently did nothing."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("FETCH_BACKEND", "crawlbase")
+    monkeypatch.setenv("CRAWLBASE_TOKEN", "tok-not-real")
+
+    db = tmp_path / "nimbus.db"
+    conn = init_db(db)
+    save_recipe(conn, make_recipe(domain=DOMAIN))
+
+    seen: list[object] = []
+
+    async def fake_robots_for(self, domain):
+        seen.append(self.backend)
+        return SimpleNamespace(crawl_delay=0.0)
+
+    async def fake_crawl_site(recipe, *, fetcher, crawl_delay, limit=None):
+        return CrawlOutcome(
+            domain=DOMAIN,
+            records=[],
+            candidates=0,
+            selected=0,
+            attempted=0,
+            fetched=0,
+            skipped_robots=0,
+            skipped_errors=0,
+        )
+
+    monkeypatch.setattr("nimbus.fetch.fetcher.Fetcher.robots_for", fake_robots_for)
+    monkeypatch.setattr("nimbus.cli.crawl_site", fake_crawl_site)
+
+    result = runner.invoke(app, ["--db", str(db), "crawl", DOMAIN])
+
+    assert result.exit_code == 0, result.output
+    assert seen and isinstance(seen[0], CrawlbaseBackend)

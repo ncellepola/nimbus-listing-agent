@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 from mcp.server.mcpserver import MCPServer
 
 from nimbus.config import Settings
-from nimbus.fetch.backends import CrawlbaseBackend, HttpxBackend
+from nimbus.fetch.backends import build_backend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher, RobotsDisallowed
 from nimbus.fetch.sitemap import is_sitemap_index, locs
@@ -181,12 +181,7 @@ def build_server(fetcher: Fetcher) -> MCPServer:
 def main() -> None:
     settings = Settings()
     cache = HtmlCache(root=settings.cache_dir)
-    if settings.fetch_backend == "crawlbase":
-        token = settings.crawlbase_token.get_secret_value() if settings.crawlbase_token else ""
-        backend = CrawlbaseBackend(token=token, user_agent=settings.user_agent)
-    else:
-        backend = HttpxBackend(user_agent=settings.user_agent)
-    fetcher = Fetcher(settings, cache, backend)
+    fetcher = Fetcher(settings, cache, build_backend(settings))
     build_server(fetcher).run()
 
 

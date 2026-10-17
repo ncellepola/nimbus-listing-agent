@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -40,7 +41,7 @@ from nimbus.extractor import (
     record_extraction,
     unchanged_since_last_run,
 )
-from nimbus.fetch.backends import HttpxBackend
+from nimbus.fetch.backends import build_backend
 from nimbus.fetch.cache import HtmlCache
 from nimbus.fetch.fetcher import Fetcher
 from nimbus.heal import heal_site, site_health
@@ -130,8 +131,13 @@ def crawl(
         typer.echo(f"No recipe saved for {domain!r}. Run `nimbus onboard {domain}` first.")
         raise typer.Exit(code=1)
 
+    started_at = datetime.now(UTC)
     cache = HtmlCache(root=settings.cache_dir)
-    fetcher = Fetcher(settings, cache, HttpxBackend(user_agent=settings.user_agent))
+    # build_backend, not HttpxBackend: FETCH_BACKEND=crawlbase is
+    # advertised by ADR-0005 and .env.example as the live switch, and
+    # used to be read only by the MCP server, so it silently did
+    # nothing here.
+    fetcher = Fetcher(settings, cache, build_backend(settings))
 
     # Crawl delay is resolved from *live* robots.txt, not the recipe: a
     # recipe can be weeks stale while robots.txt is current policy (see
@@ -160,6 +166,13 @@ def crawl(
         # apply_delta, rather than let an empty listings set caused by
         # "extraction never ran" be read as a real withdrawal signal.
         typer.echo("No ANTHROPIC_API_KEY configured; stopping before extraction.")
+        storage.record_crawl_run(
+            conn,
+            domain,
+            started_at=started_at,
+            pages_fetched=outcome.fetched,
+            listings_found=0,
+        )
         return
 
     from anthropic import AsyncAnthropic
@@ -223,6 +236,14 @@ def crawl(
         allow_mass_withdrawal=should_allow_mass_withdrawal(outcome, results),
     )
     console.print_delta(f"{domain} delta", report)
+
+    storage.record_crawl_run(
+        conn,
+        domain,
+        started_at=started_at,
+        pages_fetched=outcome.fetched,
+        listings_found=len(listings),
+    )
 
 
 @app.command()
