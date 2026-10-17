@@ -13,7 +13,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nimbus.models import FieldHint, PaginationRule, SiteRecipe
+from nimbus.models import FieldHint, Listing, PaginationRule, SiteRecipe
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sites (
@@ -204,5 +204,141 @@ def insert_audit(conn: sqlite3.Connection, **fields) -> None:
     conn.execute(
         f"INSERT INTO extraction_audit ({columns}) VALUES ({placeholders})",
         fields,
+    )
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Listing upsert and price history (Task 6). `nimbus.delta.apply_delta`
+# composes these primitives into the nightly new/changed/withdrawn/
+# unchanged classification; they are kept here, next to the schema they
+# write, rather than duplicated in nimbus.delta.
+# --------------------------------------------------------------------------
+
+
+def _row_to_listing(row: sqlite3.Row) -> Listing:
+    return Listing(
+        source_domain=row["source_domain"],
+        source_url=row["source_url"],
+        external_id=row["external_id"],
+        address=row["address"],
+        postcode=row["postcode"],
+        price_gbp=row["price_gbp"],
+        price_qualifier=row["price_qualifier"],
+        bedrooms=row["bedrooms"],
+        bathrooms=row["bathrooms"],
+        property_type=row["property_type"],
+        tenure=row["tenure"],
+        floor_area_sqft=row["floor_area_sqft"],
+        description=row["description"],
+        agent_name=row["agent_name"],
+        listed_date=row["listed_date"],
+        content_hash=row["content_hash"],
+    )
+
+
+def get_listing(conn: sqlite3.Connection, source_url: str) -> Listing | None:
+    """The stored `Listing` for `source_url`, or `None` if it has never
+    been seen before."""
+    row = conn.execute(
+        "SELECT * FROM listings WHERE source_url = ?",
+        (source_url,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_listing(row)
+
+
+def list_listings(conn: sqlite3.Connection, domain: str) -> list[Listing]:
+    """Every listing currently stored for `domain`, regardless of whether
+    it appeared in the most recent crawl — this is the "what we already
+    knew" side of a nightly delta."""
+    rows = conn.execute(
+        "SELECT * FROM listings WHERE source_domain = ? ORDER BY source_url",
+        (domain,),
+    ).fetchall()
+    return [_row_to_listing(row) for row in rows]
+
+
+def upsert_listing(conn: sqlite3.Connection, listing: Listing) -> None:
+    """Insert `listing`, or update it in place if `source_url` already
+    exists. `first_seen_at` is set once and never overwritten;
+    `last_seen_at` always moves to now. Does not write `listing_history` —
+    that is `insert_price_history`'s job, called separately when the
+    caller has decided the price actually changed."""
+    now = datetime.now(UTC).isoformat()
+    existing = conn.execute(
+        "SELECT first_seen_at FROM listings WHERE source_url = ?",
+        (listing.source_url,),
+    ).fetchone()
+    first_seen_at = existing["first_seen_at"] if existing is not None else now
+
+    conn.execute(
+        """
+        INSERT INTO listings (
+            source_domain, source_url, external_id, address, postcode,
+            price_gbp, price_qualifier, bedrooms, bathrooms, property_type,
+            tenure, floor_area_sqft, description, agent_name, listed_date,
+            content_hash, first_seen_at, last_seen_at
+        ) VALUES (
+            :source_domain, :source_url, :external_id, :address, :postcode,
+            :price_gbp, :price_qualifier, :bedrooms, :bathrooms, :property_type,
+            :tenure, :floor_area_sqft, :description, :agent_name, :listed_date,
+            :content_hash, :first_seen_at, :last_seen_at
+        )
+        ON CONFLICT (source_url) DO UPDATE SET
+            external_id = excluded.external_id,
+            address = excluded.address,
+            postcode = excluded.postcode,
+            price_gbp = excluded.price_gbp,
+            price_qualifier = excluded.price_qualifier,
+            bedrooms = excluded.bedrooms,
+            bathrooms = excluded.bathrooms,
+            property_type = excluded.property_type,
+            tenure = excluded.tenure,
+            floor_area_sqft = excluded.floor_area_sqft,
+            description = excluded.description,
+            agent_name = excluded.agent_name,
+            listed_date = excluded.listed_date,
+            content_hash = excluded.content_hash,
+            last_seen_at = excluded.last_seen_at
+        """,
+        {
+            "source_domain": listing.source_domain,
+            "source_url": listing.source_url,
+            "external_id": listing.external_id,
+            "address": listing.address,
+            "postcode": listing.postcode,
+            "price_gbp": listing.price_gbp,
+            "price_qualifier": listing.price_qualifier,
+            "bedrooms": listing.bedrooms,
+            "bathrooms": listing.bathrooms,
+            "property_type": listing.property_type,
+            "tenure": listing.tenure,
+            "floor_area_sqft": listing.floor_area_sqft,
+            "description": listing.description,
+            "agent_name": listing.agent_name,
+            "listed_date": listing.listed_date.isoformat() if listing.listed_date else None,
+            "content_hash": listing.content_hash,
+            "first_seen_at": first_seen_at,
+            "last_seen_at": now,
+        },
+    )
+    conn.commit()
+
+
+def insert_price_history(
+    conn: sqlite3.Connection,
+    source_url: str,
+    old_price_gbp: int | None,
+    new_price_gbp: int | None,
+) -> None:
+    """Record one price change for `source_url`. Called only when a caller
+    (`nimbus.delta.apply_delta`) has already decided the price genuinely
+    changed — this function does not compare, it only records."""
+    conn.execute(
+        "INSERT INTO listing_history (source_url, old_price_gbp, new_price_gbp, changed_at) "
+        "VALUES (?, ?, ?, ?)",
+        (source_url, old_price_gbp, new_price_gbp, datetime.now(UTC).isoformat()),
     )
     conn.commit()
