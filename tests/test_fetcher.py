@@ -305,3 +305,29 @@ async def test_get_rejects_a_stale_non_2xx_cache_entry(tmp_path, settings):
 
     with pytest.raises(FetchStatusError):
         await fetcher.get("https://www.example.co.uk/property/1")
+
+
+async def test_get_refetches_when_the_cached_page_is_older_than_settings_max_age(tmp_path):
+    """The nightly delta can only fire if the nightly crawl actually
+    re-reads the site. Without a staleness bound, `Fetcher.get()` served
+    yesterday's cache entry forever and every page was `unchanged`."""
+    settings = Settings(
+        anthropic_api_key="",
+        cache_dir=tmp_path / "cache",
+        db_path=tmp_path / "nimbus.db",
+        user_agent="NimbusBot/0.1 (+https://github.com/ncellepola/nimbus-listing-agent)",
+        cache_max_age=0.0,  # everything already on disk is stale
+    )
+    cache = HtmlCache(root=tmp_path)
+    cache.put(
+        "https://www.example.co.uk/robots.txt", 200, "text/plain", "User-agent: *\nAllow: /\n"
+    )
+    cache.put("https://www.example.co.uk/property/1", 200, "text/html", "<html>yesterday</html>")
+
+    backend = _StatusBackend(200, "<html>today</html>")
+    backend.content_type = "text/html"
+    fetcher = Fetcher(settings, cache, backend)
+
+    page = await fetcher.get("https://www.example.co.uk/property/1")
+
+    assert page.body == "<html>today</html>"

@@ -110,7 +110,7 @@ class Fetcher:
         policy.crawl_delay = self.settings.default_crawl_delay
         return policy
 
-    async def _fetch_raw(self, url: str, *, max_age: float | None = None) -> CachedPage:
+    async def _fetch_raw(self, url: str) -> CachedPage:
         """Cache-first fetch with no robots check — used for robots.txt
         itself, which must always be reachable regardless of policy.
 
@@ -118,7 +118,7 @@ class Fetcher:
         a 2xx one to the cache: `robots_for` needs to see the status to
         decide which fallback branch it is in, and a cached 503 would make
         that decision once and for all time."""
-        cached = self.cache.get(url, max_age=max_age)
+        cached = self.cache.get(url, max_age=self.settings.cache_max_age)
         if cached is not None:
             return cached
         response = await self.backend.fetch(url, timeout=self.settings.request_timeout)
@@ -138,7 +138,7 @@ class Fetcher:
             )
         return self.cache.put(url, response.status, response.content_type, response.body)
 
-    async def robots_for(self, domain: str, *, max_age: float | None = None) -> RobotsPolicy:
+    async def robots_for(self, domain: str) -> RobotsPolicy:
         """`domain`'s robots policy, resolved fresh from the live file.
 
         Four distinct outcomes, each logged at WARNING when it is a
@@ -155,7 +155,7 @@ class Fetcher:
         """
         robots_url = f"https://{domain}/robots.txt"
         try:
-            raw = await self._fetch_raw(robots_url, max_age=max_age)
+            raw = await self._fetch_raw(robots_url)
         except Exception:
             logger.warning(
                 "robots.txt for %s is unreachable (transport error); assuming complete "
@@ -198,20 +198,13 @@ class Fetcher:
             default_crawl_delay=self.settings.default_crawl_delay,
         )
 
-    async def get(
-        self,
-        url: str,
-        *,
-        allow_network: bool = True,
-        max_age: float | None = None,
-    ) -> CachedPage:
+    async def get(self, url: str, *, allow_network: bool = True) -> CachedPage:
         """Fetch `url`, robots-gated and cache-first.
 
-        `max_age` (seconds) bounds how old a cache entry may be before it
-        is treated as a miss and re-fetched; `None` means "never expires",
-        which is what the offline demo and the test suite rely on. The
-        nightly crawl passes `Settings.cache_max_age` so that a delta
-        against yesterday's bytes is impossible.
+        Cache entries older than `Settings.cache_max_age` are treated as
+        misses and re-fetched. `cache_max_age = None` disables that, which
+        is what `nimbus demo --offline` configures so its seeded fixtures
+        never expire (ADR-0004).
 
         Raises `RobotsDisallowed` before any network call if policy says
         so, `FetchStatusError` (a `FetchError`) for a non-2xx response, and
@@ -220,11 +213,11 @@ class Fetcher:
         it were page content.
         """
         domain = urlsplit(url).netloc
-        policy = await self.robots_for(domain, max_age=max_age)
+        policy = await self.robots_for(domain)
         if not policy.can_fetch(url):
             raise RobotsDisallowed(url)
 
-        cached = self.cache.get(url, max_age=max_age)
+        cached = self.cache.get(url, max_age=self.settings.cache_max_age)
         if cached is not None:
             if not _is_ok(cached.status):
                 # Written before non-2xx caching was removed. Treated as a

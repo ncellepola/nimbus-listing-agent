@@ -224,6 +224,11 @@ async def run_offline_demo() -> None:
             anthropic_api_key="",
             cache_dir=tmp_path / "cache",
             db_path=tmp_path / "nimbus.db",
+            # The demo's seeded fixtures must never expire: `--offline`
+            # has no network to revalidate against and must print the
+            # same bytes forever (ADR-0004). Production's 12-hour bound
+            # is what makes the nightly delta able to fire at all.
+            cache_max_age=None,
         )
         cache = HtmlCache(root=settings.cache_dir)
         fetcher = Fetcher(settings, cache, _NoNetworkBackend())
