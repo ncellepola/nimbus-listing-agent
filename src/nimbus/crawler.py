@@ -1,7 +1,7 @@
 """The deterministic, recipe-driven crawler.
 
 This is the hot path: it runs every night, across every onboarded site, and
-contains no LLM anywhere in it (`test_crawler_module_imports_no_llm_client`
+contains no LLM anywhere in it (`test_crawler_module_contains_no_llm_client`
 greps this file for the two LLM client package names and fails the build if
 either appears). By the time this module runs, an LLM has already spent its
 one-time cost producing a `SiteRecipe` (Task 3); everything here is a plain
@@ -244,6 +244,14 @@ async def crawl_site(
     been discarded -- a caller cannot recover them by inspecting `records`
     alone, and must not have to re-crawl just to find out how many URLs
     failed.
+
+    Also logs one `ERROR` summary line distinguishing two failure shapes
+    that must not be confused with each other or with a quiet night: a
+    recipe whose `listing_url_patterns` suddenly match none of the
+    candidates found (recipe drift -- the thing Task 6's health
+    monitor/self-heal exist to catch) versus every selected URL failing to
+    fetch or being disallowed (usually transient). See the comment above
+    the logging calls below for the exact conditions.
     """
     candidates = await collect_candidate_urls(recipe, fetcher=fetcher)
     listing_urls = select_listing_urls(candidates, recipe)
@@ -281,13 +289,29 @@ async def crawl_site(
         )
 
     # One summary line per run, at a severity that actually distinguishes
-    # "this site genuinely has nothing new tonight" from "every fetch
-    # failed" -- across hundreds of sites, those two must not look
-    # identical in the logs with only per-URL WARNINGs to tell them apart.
-    if listing_urls and not records:
+    # "this site genuinely has nothing new tonight" from the two distinct
+    # failure shapes below -- across hundreds of sites, none of these three
+    # must look identical in the logs with only per-URL WARNINGs to tell
+    # them apart.
+    if candidates and not listing_urls:
+        # Candidates existed but listing_url_patterns matched none of
+        # them: this is recipe drift, not a quiet night. A site redesign
+        # that changes its URL structure produces exactly this shape, and
+        # it is precisely what Task 6's health monitor/self-heal exist to
+        # notice -- it needs a recipe repair, not a retry.
         logger.error(
-            "crawl_site(%s): all %d candidate listing URL(s) failed or were disallowed "
-            "(skipped_robots=%d, skipped_errors=%d)",
+            "crawl_site(%s): listing_url_patterns matched none of %d candidate URL(s); "
+            "the recipe's patterns may be stale (a site redesign is the usual cause)",
+            recipe.domain,
+            len(candidates),
+        )
+    elif listing_urls and not records:
+        # Patterns matched, but every matched URL failed to fetch or was
+        # disallowed -- usually transient (a network blip, a temporary
+        # block), unlike the pattern-mismatch case above.
+        logger.error(
+            "crawl_site(%s): all %d selected listing URL(s) failed to fetch or were "
+            "disallowed (skipped_robots=%d, skipped_errors=%d)",
             recipe.domain,
             len(listing_urls),
             skipped_robots,

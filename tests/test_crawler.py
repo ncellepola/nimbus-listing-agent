@@ -506,11 +506,13 @@ async def test_crawl_site_raises_nothing_when_all_candidates_disallowed(cache, f
     assert outcome.fetched == 0
 
 
-async def test_crawl_site_logs_error_summary_when_every_candidate_fails(cache, fetcher, caplog):
-    """ "This site has nothing new tonight" and "every fetch failed" must
-    not be indistinguishable in the logs. When there were candidate
-    listing URLs but none produced a record, the summary line is an
-    ERROR, not a WARNING."""
+async def test_crawl_site_logs_error_summary_when_every_selected_url_fails_to_fetch(
+    cache, fetcher, caplog
+):
+    """ "This site has nothing new tonight" and "every selected URL failed
+    to fetch" must not be indistinguishable in the logs. When patterns
+    matched candidates but none of the selected URLs produced a record,
+    the summary line is an ERROR, not a WARNING or an INFO."""
     cache.put("https://www.henstockps.co.uk/robots.txt", 200, "text/plain", HENSTOCK_ROBOTS)
     cache.put(
         "https://www.henstockps.co.uk/sitemap.xml",
@@ -532,9 +534,53 @@ async def test_crawl_site_logs_error_summary_when_every_candidate_fails(cache, f
         outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
 
     assert outcome.records == []
+    assert outcome.selected == 1
     summary = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert summary, "expected an ERROR summary line when every candidate failed"
+    assert summary, "expected an ERROR summary line when every selected URL failed"
     assert "henstockps.co.uk" in summary[0].getMessage()
+    assert "selected" in summary[0].getMessage()
+
+
+async def test_crawl_site_logs_error_summary_when_patterns_match_no_candidates(
+    cache, fetcher, caplog
+):
+    """Candidates found, but listing_url_patterns matched none of them, is
+    the clearest signal of recipe drift (a site redesign changing its URL
+    structure) -- not a quiet night. It must be an ERROR naming the
+    pattern-mismatch specifically, distinct from "every selected URL
+    failed to fetch", because the two call for different responses: a
+    recipe repair versus a usually-transient retry."""
+    cache.put("https://www.ashworthholme.co.uk/robots.txt", 200, "text/plain", ALLOW_ALL_ROBOTS)
+    cache.put(
+        "https://www.ashworthholme.co.uk/sitemap.xml",
+        200,
+        "application/xml",
+        """<?xml version="1.0"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://www.ashworthholme.co.uk/listing/1</loc></url>
+          <url><loc>https://www.ashworthholme.co.uk/listing/2</loc></url>
+        </urlset>""",
+    )
+    recipe = make_recipe(
+        domain="ashworthholme.co.uk",
+        sitemap_urls=["https://www.ashworthholme.co.uk/sitemap.xml"],
+        listing_index_urls=[],
+        # The site's sitemap now serves /listing/* URLs; the recipe still
+        # expects the old /property/* shape -- a redesign in miniature.
+        listing_url_patterns=["/property/*"],
+    )
+
+    with caplog.at_level(logging.INFO, logger="nimbus.crawler"):
+        outcome = await crawl_site(recipe, fetcher=fetcher, crawl_delay=0.0)
+
+    assert outcome.records == []
+    assert outcome.candidates == 2
+    assert outcome.selected == 0
+    summary = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert summary, "expected an ERROR summary line when patterns match no candidates"
+    message = summary[0].getMessage()
+    assert "ashworthholme.co.uk" in message
+    assert "matched none" in message
 
 
 async def test_crawl_site_logs_info_summary_on_a_normal_run(cache, fetcher, caplog):
