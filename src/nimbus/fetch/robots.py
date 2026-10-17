@@ -205,6 +205,20 @@ class RobotsPolicy:
             ai_signals=AiSignals(),
         )
 
+    @classmethod
+    def deny_all(cls, agent: str) -> RobotsPolicy:
+        """A policy that disallows every path. Used when robots.txt is
+        *unreachable* rather than merely absent (RFC 9309 2.3.1.4: a
+        crawler "MUST assume complete disallow" when the file cannot be
+        fetched because of a server error) -- see `Fetcher.robots_for`."""
+        return cls(
+            agent=agent,
+            rules=[(False, "/")],
+            crawl_delay=DEFAULT_CRAWL_DELAY,
+            sitemaps=[],
+            ai_signals=AiSignals(),
+        )
+
     def can_fetch(self, url: str) -> bool:
         parsed = urlsplit(url)
         path = parsed.path or "/"
